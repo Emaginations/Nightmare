@@ -1,16 +1,17 @@
 """
-喊你睡觉：一个简单的催睡插件，过点让麦麦变成魔鬼追着你催你睡觉
+喊你睡觉：一个简单的催睡插件
 
-2026-5-22 建立项目,将WebUI配置中文本地化，测试/night命令
-2026-5-23 建立仓库，first push，
-
+2026-5-22 建立项目,尝试将WebUI配置中文本地化
+2026-5-23 调整催睡时间设置的时间格式，添加睡眠时长sleep_hours用于
 """
 
-from maibot_sdk import API, Field, MaiBotPlugin, MessageGateway, PluginConfigBase, PluginContext, Tool, Command
+from maibot_sdk import API, Field, MaiBotPlugin, MessageGateway, PluginConfigBase, PluginContext, Tool, Command, EventHandler
+from maibot_sdk.types import EventType, ToolParameterInfo, ToolParamType
 from typing import Dict, Optional, ClassVar
 import asyncio
 import random
-import time, datetime
+import time
+import datetime
 
 # ============================================================================
 # 多语言化
@@ -80,100 +81,89 @@ class NightmarePluginSection(PluginConfigBase):
 
 
 class SchedulerConfig(PluginConfigBase):
-    """催睡时间范围设置。"""
+    """催睡时间设置。"""
 
     __ui_label__: ClassVar[str] = "催睡时间"
     __ui_order__: ClassVar[int] = 1
 
-    start_hour: int = Field(
-        default=22,
-        ge=0,
-        le=23,
-        description="催睡开始小时（0-23）",
+class SchedulerConfig(PluginConfigBase):
+    """催睡时间设置。"""
+
+    __ui_label__: ClassVar[str] = "催睡时间"
+    __ui_order__: ClassVar[int] = 1
+
+    start_time: str = Field(
+        default="22:00",
+        pattern=r"^([01]\d|2[0-3]):([0-5]\d)$",
+        description="催睡开始时间（格式 HH:MM，例如 22:00）",
         json_schema_extra={
-            "label": "开始时间（时）",
+            "label": "开始时间",
+            "placeholder": "22:00",
             "i18n": _schema_i18n(
-                label_en="Start hour",
-                label_ja="開始時間（時）",
-                hint_en="The hour when bedtime reminders begin.",
-                hint_ja="就寝リマインダーを開始する時間。",
+                label_en="Start time",
+                label_ja="開始時間",
+                hint_en="Bedtime reminder start time (format HH:MM, e.g., 22:00).",
+                hint_ja="就寝リマインダー開始時間（形式 HH:MM、例：22:00）。",
             ),
             "order": 0,
         },
     )
 
-    start_minute: int = Field(
-        default=0,
-        ge=0,
-        le=59,
-        description="催睡开始分钟（0-59）",
-        json_schema_extra={
-            "label": "开始时间（分）",
-            "i18n": _schema_i18n(
-                label_en="Start minute",
-                label_ja="開始時間（分）",
-                hint_en="The minute when bedtime reminders begin.",
-                hint_ja="就寝リマインダーを開始する分。",
-            ),
-            "order": 1,
-        },
-    )
+    # 辅助方法：获取小时
+    @property
+    def start_hour(self) -> int:
+        return int(self.start_time.split(":")[0])
 
-    end_hour: int = Field(
-        default=2,
-        ge=0,
-        le=23,
-        description="催睡结束小时（0-23），允许跨天，例如凌晨2点",
-        json_schema_extra={
-            "label": "结束时间（时）",
-            "i18n": _schema_i18n(
-                label_en="End hour",
-                label_ja="終了時間（時）",
-                hint_en="The hour when bedtime reminders stop. Can cross midnight (e.g., 2 for 2 AM).",
-                hint_ja="就寝リマインダーを終了する時間。日をまたぐことも可能（例：午前2時なら2）。",
-            ),
-            "order": 2,
-        },
-    )
+    # 辅助方法：获取分钟
+    @property
+    def start_minute(self) -> int:
+        return int(self.start_time.split(":")[1])
 
-    end_minute: int = Field(
-        default=0,
-        ge=0,
-        le=59,
-        description="催睡结束分钟（0-59）",
-        json_schema_extra={
-            "label": "结束时间（分）",
-            "i18n": _schema_i18n(
-                label_en="End minute",
-                label_ja="終了時間（分）",
-                hint_en="The minute when bedtime reminders stop.",
-                hint_ja="就寝リマインダーを終了する分。",
-            ),
-            "order": 3,
-        },
-    )
-
-    # 辅助属性：判断当前时间是否在催睡范围内（含跨天）
+    # 辅助方法：获取总分钟数
     @property
     def total_start_minutes(self) -> int:
         return self.start_hour * 60 + self.start_minute
 
+    # 辅助方法：判断当前时间是否应该催睡
+    def should_remind(self, current_hour: int, current_minute: int) -> bool:
+        """判断当前时间是否应该触发催睡"""
+        current_total = current_hour * 60 + current_minute
+        return current_total >= self.total_start_minutes
+    
+    # 睡眠时长：4-12小时，步进1小时
+    sleep_hours: int = Field(
+    default=8,
+    ge=4,
+    le=12,
+    description="你睡觉的时长，低于这个时间间隔发言会被催睡，默认为4小时",
+    json_schema_extra={
+        "label": "睡眠时长（小时）",
+        "hint": "你睡觉的时长，低于这个时间间隔发言会被催睡，默认为4小时",
+        "x-widget": "slider",
+        "min": 4,
+        "max": 12,
+        "step": 1,
+        "i18n": _schema_i18n(
+            label_en="Sleep hours",
+            label_ja="睡眠時間（時間）",
+            hint_en="Your sleep duration. Reminders will continue if the interval is less than this value. Default is 4 hours.",
+            hint_ja="あなたの睡眠時間。この時間より間隔が短い場合、リマインダーは続行されます。デフォルトは4時間です。",
+        ),
+        "order": 2,
+    },
+)
+
+    # 辅助方法：获取开始时间的总分钟数
     @property
-    def total_end_minutes(self) -> int:
-        return self.end_hour * 60 + self.end_minute
+    def total_start_minutes(self) -> int:
+        """获取开始时间的总分钟数"""
+        return self.start_hour * 60 + self.start_minute
 
-    def is_in_range(self, hour: int, minute: int) -> bool:
-        """检查给定时间是否在催睡时间范围内（支持跨天）。"""
-        current = hour * 60 + minute
-        start = self.total_start_minutes
-        end = self.total_end_minutes
-
-        if start <= end:
-            # 同一天内，例如 22:00 ~ 次日 02:00 的跨天情况不会走这里
-            return start <= current <= end
-        else:
-            # 跨天，例如 22:00 ~ 02:00
-            return current >= start or current <= end
+    # 辅助方法：判断当前时间是否应该催睡
+    def should_remind(self, current_hour: int, current_minute: int) -> bool:
+        """判断当前时间是否应该触发催睡"""
+        current_total = current_hour * 60 + current_minute
+        return current_total >= self.total_start_minutes
         
 class ReminderConfig(PluginConfigBase):
     """提醒频率与重复设置。"""
@@ -199,7 +189,7 @@ class ReminderConfig(PluginConfigBase):
         },
     )
 
-class LLMusingConfig(PluginConfigBase):
+class LLMConfig(PluginConfigBase):
     """LLM提示词设置。"""
     __ui_label__: ClassVar[str] = "LLM提示词设置"
     __ui_order__: ClassVar[int] = 3
@@ -262,7 +252,7 @@ class NightmareConfig(PluginConfigBase):
     plugin: NightmarePluginSection = Field(default_factory=NightmarePluginSection)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     reminder: ReminderConfig = Field(default_factory=ReminderConfig)
-    llm_config: LLMusingConfig = Field(default_factory=LLMusingConfig)
+    llm_config: LLMConfig = Field(default_factory=LLMConfig)
     default_good_night: DefualtGoodNightConfig = Field(default_factory=DefualtGoodNightConfig)
 
 
@@ -281,17 +271,45 @@ class NightmarePlugin(MaiBotPlugin):
         if scope == "self":
             self.ctx.logger.info("[喊你睡觉]插件配置已更新: version=%s", version)
 
-    config_model = NightmareConfig #你必须先加载webui配置
+    config_model = NightmareConfig #你必须先加载配置
 
+    @EventHandler(
+    "get_user_info",
+    description="获取用户信息",
+    event_type=EventType.ON_MESSAGE,
+)
+    async def on_user_message(self, message, **kwargs):
+        """获取用户信息示例"""
+        user_info = message.get("user_info", {})
+        user_id = user_info.get("user_id", "unknown")
+        user_name = user_info.get("user_name", user_id)
+        user_nickname = user_info.get("user_nickname", user_name)
     
+        # 更新互动时间时使用用户ID
+        self._last_remind_time[user_id] = time.time()
+    
+        self.ctx.logger.info(f"[喊你睡觉]用户 {user_name}({user_id}) 发送了消息")
+        return {"intercepted": False}
+
+
     @Command("night", description="测试命令", pattern=r"^/night$")
     async def handle_nightmare(self, stream_id: str = "", **kwargs):
         """测试命令"""
-        del kwargs
-
-        await self.ctx.send.text(f"👻 ", stream_id)
-        return True, "测试命令", True
+        # 获取用户信息
+        message = kwargs.get("message", {})
+        user_info = message.get("user_info", {})
+        user_name = user_info.get("user_name") or user_info.get("user_nickname") or user_info.get("user_id", "小伙伴")
     
+        now = datetime.datetime.now()
+        remind_message = f"💤 {user_name}，现在时间 {now.strftime('%H:%M')}，该睡觉啦！💤"
+    
+        await self.ctx.send.text(remind_message, stream_id)
+    
+    # 记录日志
+        self.ctx.logger.info(f"[喊你睡觉]:已推送催睡，时间{now}，用户{user_name}，聊天内容{remind_message}")
+    
+        return True, f"已向{user_name}发送催睡测试", True
+
     @Command("echo", pattern=r"^/echo\s+(?P<text>.+)$")
     async def handle_echo(self, **kwargs):
         """回响"""
