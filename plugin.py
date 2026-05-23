@@ -2,7 +2,7 @@
 喊你睡觉：一个简单的催睡插件
 
 2026-5-22 建立项目,尝试将WebUI配置中文本地化
-2026-5-23 调整催睡时间设置的时间格式，添加睡眠时长sleep_hours用于
+2026-5-23 调整催睡时间设置的时间格式，添加睡眠时长sleep_hours,尝试获取用户ID
 """
 
 from maibot_sdk import API, Field, MaiBotPlugin, MessageGateway, PluginConfigBase, PluginContext, Tool, Command, EventHandler
