@@ -3,6 +3,7 @@
 
 2026-5-22 建立项目,尝试将WebUI配置中文本地化
 2026-5-23 调整催睡时间设置的时间格式，添加睡眠时长sleep_hours,尝试获取用户ID
+2026-5-24 增补readme，进行详细功能说明(设计),添加无差别催睡功能，默认关闭
 """
 
 from maibot_sdk import API, Field, MaiBotPlugin, MessageGateway, PluginConfigBase, PluginContext, Tool, Command, EventHandler
@@ -92,10 +93,23 @@ class SchedulerConfig(PluginConfigBase):
     __ui_label__: ClassVar[str] = "催睡时间"
     __ui_order__: ClassVar[int] = 1
 
+    user: str = Field(
+        default="你必须先填写用户名",
+        description="用户名",
+        json_schema_extra={
+            "label": "用户名",
+            "i18n": _schema_i18n(
+                label_en="User name",
+                label_ja="ユーザー名"                        
+            ),
+            "order": 0,
+        }
+    )
+
     start_time: str = Field(
         default="22:00",
         pattern=r"^([01]\d|2[0-3]):([0-5]\d)$",
-        description="催睡开始时间（格式 HH:MM，例如 22:00）",
+        description="催促开始时间（格式 HH:MM，例如 22:00）",
         json_schema_extra={
             "label": "开始时间",
             "placeholder": "22:00",
@@ -105,7 +119,7 @@ class SchedulerConfig(PluginConfigBase):
                 hint_en="Bedtime reminder start time (format HH:MM, e.g., 22:00).",
                 hint_ja="就寝リマインダー開始時間（形式 HH:MM、例：22:00）。",
             ),
-            "order": 0,
+            "order": 1,
         },
     )
 
@@ -135,10 +149,10 @@ class SchedulerConfig(PluginConfigBase):
     default=8,
     ge=4,
     le=12,
-    description="你睡觉的时长，低于这个时间间隔发言会被催睡，默认为4小时",
+    description="设定你睡觉的时长，低于这个时间间隔发言会被继续催促，默认为4小时",
     json_schema_extra={
         "label": "睡眠时长（小时）",
-        "hint": "你睡觉的时长，低于这个时间间隔发言会被催睡，默认为4小时",
+        "hint": "设定你睡觉的时长，低于这个时间间隔发言会被继续催促，默认为4小时",
         "x-widget": "slider",
         "min": 4,
         "max": 12,
@@ -195,7 +209,7 @@ class LLMConfig(PluginConfigBase):
     __ui_order__: ClassVar[int] = 3
 
     enable_llm: bool = Field(
-        default=False,
+        default=True,
         description="是否启用LLM跟据上下文生成喊你睡觉的话",
         json_schema_extra={
             "label": "是否启用LLM",
