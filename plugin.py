@@ -623,3 +623,5 @@ class NightmarePlugin(MaiBotPlugin):
 
 def create_plugin():
     return NightmarePlugin()
+
+############构建过程参见NOREADME.md############
