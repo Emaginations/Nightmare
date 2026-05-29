@@ -231,11 +231,11 @@ class LLMConfig(PluginConfigBase):
     __ui_order__: ClassVar[int] = 3
 
     enable_llm: bool = Field(
-        default=False,
-        description="是否启用LLM跟据上下文生成喊你睡觉的话",
+        default=True,
+        description="是否启用LLM跟据上下文生成催促你睡觉的话",
         json_schema_extra={
             "label": "是否启用LLM",
-            "hint": "是否启用LLM跟据上下文生成喊你睡觉的话",
+            "hint": "是否启用LLM跟据上下文生成催促你睡觉的话",
             "i18n": _schema_i18n(
                 label_en="Enable LLM",
                 label_ja="LLMを有効にする",
@@ -353,6 +353,28 @@ class NightmarePlugin(MaiBotPlugin):
 
     config_model = NightmareConfig
 
+    # ===== 辅助方法 =====
+    
+    def _get_user_name(self, user_info: dict, user_id: str = "") -> str:
+        """从user_info中提取用户名，按优先级依次尝试"""
+        user_name = user_info.get("user_nickname", "")
+        if user_name:
+            return user_name
+        
+        user_name = user_info.get("nickname", "")
+        if user_name:
+            return user_name
+        
+        user_name = user_info.get("user_name", "")
+        if user_name:
+            return user_name
+        
+        user_name = user_info.get("person_name", "")
+        if user_name:
+            return user_name
+        
+        return user_id or "小伙伴"
+
     # ===== 工具方法 =====
     
     @Tool(
@@ -371,25 +393,21 @@ class NightmarePlugin(MaiBotPlugin):
     )
     async def check_sleep_time(self, user_id: str, **kwargs):
         """检查是否应该催睡：时间条件 + 互动间隔条件"""
-        config = self.config_model
+        config = self.config
         
-        # 获取当前时间（datetime.now()返回datetime对象，格式与配置不同）
         now = datetime.datetime.now()
         current_hour = now.hour
         current_minute = now.minute
         
-        # 解析配置中的入睡时间（格式：HH:MM）
         start_time_parts = config.scheduler.start_time.split(":")
         start_hour = int(start_time_parts[0])
         start_minute = int(start_time_parts[1])
         
-        # 检查时间条件：当前时间是否在入睡时间之后
         current_total_minutes = current_hour * 60 + current_minute
         start_total_minutes = start_hour * 60 + start_minute
         
         time_condition = current_total_minutes >= start_total_minutes
         
-        # 检查互动间隔：距离上次提醒是否超过睡眠时长（小时转秒）
         last_time = self._last_remind_time.get(user_id, 0)
         sleep_seconds = config.scheduler.sleep_hours * 3600
         interval_condition = (time.time() - last_time) > sleep_seconds
@@ -431,12 +449,10 @@ class NightmarePlugin(MaiBotPlugin):
     )
     async def generate_goodnight_text(self, stream_id: str, user_name: str, **kwargs):
         """生成晚安文本：LLM模式或默认模式"""
-        config = self.config_model
+        config = self.config
         
         if config.llm_config.enable_llm:
-            # 使用LLM生成：获取最近聊天上下文
             try:
-                # 获取最近4小时内的消息作为上下文（API - message.get_by_time_in_chat）
                 now = time.time()
                 four_hours_ago = now - 4 * 3600
                 
@@ -446,7 +462,6 @@ class NightmarePlugin(MaiBotPlugin):
                     end_time=str(now),
                 )
                 
-                # 构建可读上下文（API - message.build_readable）
                 readable_context = ""
                 if messages:
                     readable_context = await self.ctx.message.build_readable(
@@ -455,7 +470,6 @@ class NightmarePlugin(MaiBotPlugin):
                         timestamp_mode="relative",
                     )
                 
-                # 调用LLM生成（API - llm.generate）
                 prompt = config.llm_config.llm_text
                 if readable_context:
                     prompt = f"{prompt}\n\n聊天上下文：\n{readable_context}"
@@ -470,7 +484,6 @@ class NightmarePlugin(MaiBotPlugin):
             except Exception as e:
                 self.ctx.logger.error(f"[喊你睡觉]LLM调用异常: {e}")
         
-        # 默认晚安文本
         return {"text": config.default_good_night.default_good_night, "source": "default"}
 
     # ===== Hook处理器 =====
@@ -479,24 +492,22 @@ class NightmarePlugin(MaiBotPlugin):
         "chat.receive.after_process",
         name="nightmare_reminder",
         description="检测消息并催睡",
-        mode=HookMode.OBSERVE,  # 观察模式，不影响消息处理（API - HookMode）
-        order=HookOrder.LATE,    # 延后执行（API - HookOrder）
+        mode=HookMode.OBSERVE,
+        order=HookOrder.LATE,
     )
     async def check_and_remind(self, **kwargs):
         """收到消息后检查是否需要催睡"""
-        config = self.config_model
+        config = self.config
         
-        # 检查插件是否启用
         if not config.plugin.enabled:
             return
         
         message = kwargs.get("message", {})
         user_info = message.get("user_info", {})
         user_id = user_info.get("user_id", "")
-        user_name = user_info.get("user_nickname") or user_info.get("user_name", user_id)
+        user_name = self._get_user_name(user_info, user_id)
         stream_id = message.get("stream_id", "")
         
-        # 检查是否应该催睡（调用check_sleep_time逻辑，但直接内联以简化）
         now = datetime.datetime.now()
         current_total = now.hour * 60 + now.minute
         start_parts = config.scheduler.start_time.split(":")
@@ -504,23 +515,18 @@ class NightmarePlugin(MaiBotPlugin):
         
         time_ok = current_total >= start_total
         
-        # 检查互动间隔
         last_time = self._last_remind_time.get(user_id, 0)
         sleep_seconds = config.scheduler.sleep_hours * 3600
         interval_ok = (time.time() - last_time) > sleep_seconds
         
-        # 检查目标用户（无差别模式或特定用户）
         is_target = False
         if config.jam_reminder.enable_jam_reminder:
-            # 无差别模式：白名单中的用户不催睡
             if user_id not in config.jam_reminder.whitelist:
                 is_target = True
         else:
-            # 特定用户模式
             is_target = (user_id == config.scheduler.target_user)
         
         if time_ok and interval_ok and is_target:
-            # 生成晚安文本
             goodnight_result = await self.generate_goodnight_text(
                 stream_id=stream_id, 
                 user_name=user_name
@@ -528,19 +534,16 @@ class NightmarePlugin(MaiBotPlugin):
             
             goodnight_text = goodnight_result.get("text", "睡吧")
             
-            # 发送催睡消息（API - send.text）
             await self.ctx.send.text(goodnight_text, stream_id)
             
-            # 更新最后提醒时间
             self._last_remind_time[user_id] = time.time()
             
-            # 记录日志
             self.ctx.logger.info(
                 f"[喊你睡觉]:已推送催睡，时间{now.strftime('%Y-%m-%d %H:%M:%S')}，"
                 f"用户{user_name}({user_id})，聊天内容{goodnight_text[:50]}"
             )
 
-    # ===== 原有的事件处理器（已更新）=====
+    # ===== 事件处理器 =====
     
     @EventHandler(
         "get_user_info",
@@ -551,11 +554,7 @@ class NightmarePlugin(MaiBotPlugin):
         """获取用户信息并记录互动时间"""
         user_info = message.get("user_info", {})
         user_id = user_info.get("user_id", "unknown")
-        user_name = user_info.get("user_name", user_id)
-        user_nickname = user_info.get("user_nickname", user_name)
-        
-        # 更新互动时间
-        self._last_remind_time[user_id] = time.time()
+        user_name = self._get_user_name(user_info, user_id)
         
         self.ctx.logger.debug(f"[喊你睡觉]用户 {user_name}({user_id}) 发送了消息")
         return {"intercepted": False}
@@ -567,10 +566,9 @@ class NightmarePlugin(MaiBotPlugin):
         """手动触发催睡测试命令"""
         message = kwargs.get("message", {})
         user_info = message.get("user_info", {})
-        user_name = user_info.get("user_nickname") or user_info.get("user_name") or user_info.get("user_id", "小伙伴")
         user_id = user_info.get("user_id", "unknown")
+        user_name = self._get_user_name(user_info, user_id)
         
-        # 生成晚安文本
         goodnight_result = await self.generate_goodnight_text(
             stream_id=stream_id,
             user_name=user_name
@@ -579,14 +577,11 @@ class NightmarePlugin(MaiBotPlugin):
         goodnight_text = goodnight_result.get("text", "睡吧")
         source = goodnight_result.get("source", "default")
         
-        # 发送消息（API - send.text）
         await self.ctx.send.text(goodnight_text, stream_id)
         
-        # 更新提醒时间
         self._last_remind_time[user_id] = time.time()
         now = datetime.datetime.now()
         
-        # 记录日志
         self.ctx.logger.info(
             f"[喊你睡觉]:已推送催睡，时间{now.strftime('%Y-%m-%d %H:%M:%S')}，"
             f"用户{user_name}，聊天内容{goodnight_text[:50]}，来源{source}"
@@ -597,17 +592,16 @@ class NightmarePlugin(MaiBotPlugin):
     @Command("night", description="测试命令", pattern=r"^/night$")
     async def handle_nightmare(self, stream_id: str = "", **kwargs):
         """测试命令"""
-        # 获取用户信息
         message = kwargs.get("message", {})
         user_info = message.get("user_info", {})
-        user_name = user_info.get("user_name") or user_info.get("user_nickname") or user_info.get("user_id", "小伙伴")
+        user_id = user_info.get("user_id", "unknown")
+        user_name = self._get_user_name(user_info, user_id)
     
         now = datetime.datetime.now()
-        remind_message = f"晚安"
+        remind_message = "晚安"
     
         await self.ctx.send.text(remind_message, stream_id)
     
-    # 记录日志
         self.ctx.logger.info(f"[喊你睡觉]:已推送催睡，时间{now}，用户{user_name}，聊天内容{remind_message}")
     
         return True, f"已向{user_name}发送催睡测试", True
