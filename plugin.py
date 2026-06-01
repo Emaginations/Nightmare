@@ -382,7 +382,7 @@ class JamReminderConfig(PluginConfigBase):
                 placeholder_ja="ユーザーIDを入力",
             ),
             "order": 1,
-            "placeholder": "请输入用户ID",
+            "placeholder": "请输用户ID",
         },
     )
 
