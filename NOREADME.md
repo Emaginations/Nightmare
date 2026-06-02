@@ -781,3 +781,77 @@ def create_plugin():
 #### 兼容晚安睡眠管理插件，会在晚安后继续催睡。如果安装了晚安睡眠管理插件会自动读取已经设定的作息时间。(未实装)
 
 #### 其他语言翻译没有经过仔细审核。
+
+------------------------------------------------------------
+try17
+
+llm — LLM 调用
+
+llm = self.ctx.llm
+
+    await llm.generate(prompt, model="", temperature=None, max_tokens=None) — 文本生成，prompt 支持字符串或消息列表
+    await llm.generate_with_tools(prompt, tools, model="", temperature=None, max_tokens=None) — 带工具调用的生成
+    await llm.embed(text=..., texts=...) — 生成文本嵌入向量
+    await llm.get_available_models() — 获取可用模型列表，返回 list[str]
+
+temperature 和 max_tokens 省略或传入 None 时，会使用模型管理页中当前模型/任务配置的值；只有显式传入具体值时才会覆盖配置。
+
+generate 返回值：
+
+{
+    "success": True,
+    "response": "生成的文本",
+    "reasoning": "推理内容（如有）",
+    "model": "实际使用的模型名",
+    "model_name": "实际使用的模型名"
+}
+
+SDK 会始终补齐 model 字段；若 Host 仍返回旧字段名 model_name，SDK 会自动兼容。
+
+# 简单文本生成
+result = await self.ctx.llm.generate(
+    prompt="请用一句话介绍 Python",
+    temperature=0.5,
+)
+if result["success"]:
+    text = result["response"]
+
+# 用消息列表格式
+result = await self.ctx.llm.generate(
+    prompt=[
+        {"role": "system", "content": "你是一个翻译助手"},
+        {"role": "user", "content": "翻译：Hello World"},
+    ],
+)
+
+# 带工具调用
+result = await self.ctx.llm.generate_with_tools(
+    prompt="今天天气怎么样",
+    tools=[{
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "查询天气",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+            },
+        },
+    }],
+)
+tool_calls = result.get("tool_calls", [])
+
+# 单条文本嵌入
+embedding = await self.ctx.llm.embed(text="需要向量化的文本")
+
+# 批量文本嵌入
+embeddings = await self.ctx.llm.embed(
+    texts=["第一段文本", "第二段文本"],
+    task_name="embedding",
+    max_concurrent=4,
+)
+
+# 获取可用模型列表
+models = await self.ctx.llm.get_available_models()
+
+我补充一下新的LLM调用API，请参照改动try17

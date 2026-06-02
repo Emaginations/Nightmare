@@ -407,15 +407,47 @@ class NightmarePlugin(MaiBotPlugin):
         self._last_interaction: Dict[str, float] = {}
         # 记录上次催睡时间 (user_id -> timestamp)
         self._last_remind: Dict[str, float] = {}
+        # 从文件恢复状态（持久化）
+        self._load_state()
 
     async def on_unload(self) -> None:
         self.ctx.logger.info("[喊你睡觉]插件已卸载")
+        self._save_state()
 
     async def on_config_update(self, scope: str, config_data: dict, version: str) -> None:
         if scope == "self":
             self.ctx.logger.info("[喊你睡觉]插件配置已更新: version=%s", version)
 
     config_model = NightmareConfig
+
+    # ===== 持久化辅助 =====
+    def _get_state_file(self) -> str:
+        # 状态文件保存在插件目录下
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "nightmare_state.json")
+
+    def _load_state(self) -> None:
+        path = self._get_state_file()
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self._last_interaction = data.get("last_interaction", {})
+                self._last_remind = data.get("last_remind", {})
+                self.ctx.logger.info("[喊你睡觉] 已从文件恢复催睡状态")
+            except Exception as e:
+                self.ctx.logger.warning(f"[喊你睡觉] 加载状态文件失败: {e}")
+
+    def _save_state(self) -> None:
+        path = self._get_state_file()
+        try:
+            data = {
+                "last_interaction": self._last_interaction,
+                "last_remind": self._last_remind,
+            }
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self.ctx.logger.warning(f"[喊你睡觉] 保存状态文件失败: {e}")
 
     # ===== 辅助方法 =====
 
@@ -622,7 +654,8 @@ class NightmarePlugin(MaiBotPlugin):
         return (time.time() - last_remind) >= interval
 
     def _roll_probability(self) -> bool:
-        prob = self.config.scheduler.remind_probability
+        """根据催睡概率决定本次是否触发"""
+        prob = self.config.reminder.remind_probability
         if prob >= 1.0:
             return True
         if prob <= 0.0:
@@ -630,20 +663,27 @@ class NightmarePlugin(MaiBotPlugin):
         return random.random() < prob
 
     async def _do_remind(self, stream_id: str, user_name: str, platform: str, user_id: str) -> None:
-        """执行催睡"""
+        """执行催睡，包含 LLM 调用与日志"""
         config = self.config
         goodnight_text = config.default_good_night.default_good_night
+        llm_used = False
 
         # LLM 模式
         if config.llm_config.enable_llm:
             try:
-                # 获取聊天流最近消息
+                # 获取可用模型列表
+                available_models = []
+                try:
+                    available_models = await self.ctx.llm.get_available_models()
+                except Exception as e:
+                    self.ctx.logger.debug(f"[喊你睡觉] 无法获取可用模型列表: {e}")
+
+                # 获取聊天上下文
                 messages = await self.ctx.message.get_recent(
                     chat_id=stream_id,
                     limit=10,
                 )
 
-                # 手动构建上下文
                 context_lines = []
                 if messages and isinstance(messages, list):
                     for msg in messages[-5:]:
@@ -668,16 +708,28 @@ class NightmarePlugin(MaiBotPlugin):
 
                 prompt = f"{config.llm_config.llm_text}\n用户昵称：{user_name}\n平台：{platform}\n\n最近聊天记录：\n{context}"
 
-                # 根据配置决定是否指定模型
+                # 决定使用的模型
+                chosen_model = config.llm_config.llm_model.strip() if config.llm_config.llm_model else ""
+                if chosen_model and available_models and chosen_model not in available_models:
+                    self.ctx.logger.info(
+                        f"[喊你睡觉] 指定模型 '{chosen_model}' 不可用（当前可用: {available_models}），将使用任务默认模型"
+                    )
+                    chosen_model = ""
+
+                # 调用 LLM
                 generate_kwargs = {"prompt": prompt}
-                if config.llm_config.llm_model:
-                    generate_kwargs["model"] = config.llm_config.llm_model
+                if chosen_model:
+                    generate_kwargs["model"] = chosen_model
 
                 result = await self.ctx.llm.generate(**generate_kwargs)
                 if result.get("success") and result.get("response"):
                     goodnight_text = result["response"].strip()
+                    llm_used = True
+                    self.ctx.logger.info("[喊你睡觉] LLM 生成成功")
+                else:
+                    self.ctx.logger.warning("[喊你睡觉] LLM 生成失败，将使用默认文本")
             except Exception as e:
-                self.ctx.logger.warning(f"[喊你睡觉] LLM 生成失败，使用默认文本: {e}")
+                self.ctx.logger.warning(f"[喊你睡觉] LLM 调用异常，使用默认文本: {e}")
 
         if not goodnight_text or not goodnight_text.strip():
             goodnight_text = "睡吧"
@@ -685,13 +737,16 @@ class NightmarePlugin(MaiBotPlugin):
         # 发送
         await self.ctx.send.text(goodnight_text, stream_id)
 
-        # 更新催睡时间
+        # 更新催睡时间并持久化
         self._last_remind[user_id] = time.time()
+        self._save_state()
+
         now = datetime.datetime.now()
+        source = "llm" if llm_used else "default"
         self.ctx.logger.info(
             f"[喊你睡觉]:已推送催睡，时间{now.strftime('%Y-%m-%d %H:%M:%S')}，"
             f"平台{platform}，用户{user_name}({user_id})，"
-            f"聊天内容{goodnight_text[:50]}"
+            f"聊天内容{goodnight_text[:50]}，来源={source}"
         )
 
     # ===== Hook：每条消息触发 =====
@@ -700,8 +755,8 @@ class NightmarePlugin(MaiBotPlugin):
         "chat.receive.after_process",
         name="nightmare_reminder",
         description="每条消息到达后检测催睡条件",
-        mode=HookMode.OBSERVE,  # 观察模式，不影响消息处理（API - HookMode）
-        order=HookOrder.LATE,    # 延后执行（API - HookOrder）
+        mode=HookMode.OBSERVE,  # 观察模式，不影响消息处理
+        order=HookOrder.LATE,    # 延后执行
     )
     async def handle_after_receive(self, message: dict, **kwargs) -> None:
         """收到消息后检查是否需要催睡"""
@@ -715,8 +770,9 @@ class NightmarePlugin(MaiBotPlugin):
             self.ctx.logger.info(f"[喊你睡觉] 未能提取 user_id，message keys: {list(message.keys())}")
             return
 
-        # 更新用户最后互动时间
+        # 更新用户最后互动时间并持久化
         self._last_interaction[user_id] = time.time()
+        self._save_state()
 
         now = datetime.datetime.now()
         if not self._is_inside_remind_window(now):
@@ -736,7 +792,7 @@ class NightmarePlugin(MaiBotPlugin):
 
         # 概率判定
         if not self._roll_probability():
-            self.ctx.logger.info(f"[喊你睡觉] 概率判定未通过，跳过催睡。概率={self.config.scheduler.remind_probability}")
+            self.ctx.logger.info(f"[喊你睡觉] 概率判定未通过，跳过催睡。概率={self.config.reminder.remind_probability}")
             return
 
         platform = self._get_platform(message)
@@ -767,20 +823,20 @@ class NightmarePlugin(MaiBotPlugin):
 
     @Command("nightmare", description="手动触发催睡测试", pattern=r"^/nightmare$")
     async def handle_nightmare_test(self, stream_id: str = "", **kwargs):
-        # try15 - nightmare test command (强制触发)
+        # try17 - nightmare test command (强制触发，返回空字符串)
         message = kwargs.get("message", {})
         platform = self._get_platform(message)
 
         # 检查是否仅限 WebUI
         if self.config.scheduler.webui_only_commands and platform != "webui":
             await self.ctx.send.text("⚠️ 此命令仅在 WebUI 聊天中可用", stream_id)
-            return False, "此命令仅在 WebUI 聊天中可用", 0
+            return True, "", True
 
         user_id = self._get_user_id(message)
         user_name = await self._get_user_name(message, user_id, platform)
 
         await self._do_remind(stream_id, user_name, platform, user_id)
-        return True, f"已向{user_name}发送催睡测试", True
+        return True, "", True
 
     @Command("night", description="简单测试命令", pattern=r"^/night$")
     async def handle_nightmare_simple(self, stream_id: str = "", **kwargs):
@@ -790,7 +846,7 @@ class NightmarePlugin(MaiBotPlugin):
         # 检查是否仅限 WebUI
         if self.config.scheduler.webui_only_commands and platform != "webui":
             await self.ctx.send.text("⚠️ 此命令仅在 WebUI 聊天中可用", stream_id)
-            return False, "此命令仅在 WebUI 聊天中可用", 0
+            return True, "", True
 
         user_id = self._get_user_id(message)
         user_name = await self._get_user_name(message, user_id, platform)
@@ -803,7 +859,7 @@ class NightmarePlugin(MaiBotPlugin):
             f"[喊你睡觉]:已推送催睡，时间{now}，"
             f"平台{platform}，用户{user_name}，聊天内容{remind_message}"
         )
-        return True, f"已向{user_name}发送催睡测试", True
+        return True, "", True
 
     @Command("echo echo", pattern=r"^/echo\secho\s+(?P<text>.+)$")
     async def handle_echo(self, **kwargs):
@@ -818,4 +874,6 @@ class NightmarePlugin(MaiBotPlugin):
 def create_plugin():
     return NightmarePlugin()
 
-# try15
+# try17
+
+########构建过程参见NOREADME.md########
