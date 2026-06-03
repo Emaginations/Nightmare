@@ -32,6 +32,8 @@ import asyncio
 import random
 import time
 import datetime
+import json
+import os
 
 # ============================================================================
 # 多语言化
@@ -663,10 +665,10 @@ class NightmarePlugin(MaiBotPlugin):
         return random.random() < prob
 
     async def _do_remind(self, stream_id: str, user_name: str, platform: str, user_id: str) -> None:
-        """执行催睡，包含 LLM 调用与日志"""
+        """执行催睡，包含 LLM 调用与日志（try18: 日志包含模型名）"""
         config = self.config
         goodnight_text = config.default_good_night.default_good_night
-        llm_used = False
+        llm_model_used = "default"  # 记录实际使用的模型名称
 
         # LLM 模式
         if config.llm_config.enable_llm:
@@ -724,8 +726,9 @@ class NightmarePlugin(MaiBotPlugin):
                 result = await self.ctx.llm.generate(**generate_kwargs)
                 if result.get("success") and result.get("response"):
                     goodnight_text = result["response"].strip()
-                    llm_used = True
-                    self.ctx.logger.info("[喊你睡觉] LLM 生成成功")
+                    # 从返回值中提取实际使用的模型名
+                    llm_model_used = result.get("model") or result.get("model_name") or chosen_model or "llm"
+                    self.ctx.logger.info(f"[喊你睡觉] LLM 生成成功，模型={llm_model_used}")
                 else:
                     self.ctx.logger.warning("[喊你睡觉] LLM 生成失败，将使用默认文本")
             except Exception as e:
@@ -742,11 +745,12 @@ class NightmarePlugin(MaiBotPlugin):
         self._save_state()
 
         now = datetime.datetime.now()
-        source = "llm" if llm_used else "default"
+        source = "llm" if llm_model_used != "default" else "default"
         self.ctx.logger.info(
             f"[喊你睡觉]:已推送催睡，时间{now.strftime('%Y-%m-%d %H:%M:%S')}，"
             f"平台{platform}，用户{user_name}({user_id})，"
-            f"聊天内容{goodnight_text[:50]}，来源={source}"
+            f"模型={llm_model_used}，来源={source}，"
+            f"聊天内容{goodnight_text[:50]}"
         )
 
     # ===== Hook：每条消息触发 =====
@@ -823,7 +827,7 @@ class NightmarePlugin(MaiBotPlugin):
 
     @Command("nightmare", description="手动触发催睡测试", pattern=r"^/nightmare$")
     async def handle_nightmare_test(self, stream_id: str = "", **kwargs):
-        # try17 - nightmare test command (强制触发，返回空字符串)
+        # try18 - nightmare test command (强制触发，返回空字符串，日志含模型名)
         message = kwargs.get("message", {})
         platform = self._get_platform(message)
 
@@ -840,6 +844,7 @@ class NightmarePlugin(MaiBotPlugin):
 
     @Command("night", description="简单测试命令", pattern=r"^/night$")
     async def handle_nightmare_simple(self, stream_id: str = "", **kwargs):
+        # try18 - night test command (返回空字符串，日志含模型名)
         message = kwargs.get("message", {})
         platform = self._get_platform(message)
 
@@ -857,7 +862,8 @@ class NightmarePlugin(MaiBotPlugin):
 
         self.ctx.logger.info(
             f"[喊你睡觉]:已推送催睡，时间{now}，"
-            f"平台{platform}，用户{user_name}，聊天内容{remind_message}"
+            f"平台{platform}，用户{user_name}，模型=N/A，来源=command，"
+            f"聊天内容{remind_message}"
         )
         return True, "", True
 
@@ -874,6 +880,6 @@ class NightmarePlugin(MaiBotPlugin):
 def create_plugin():
     return NightmarePlugin()
 
-# try17
+# try18 怎么反而减少了行数？
 
 ########构建过程参见NOREADME.md########
