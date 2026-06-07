@@ -8,7 +8,7 @@
     "name": "1m",
     "url": "https://github.com/Emaginations"
   },
-  "license": "Apache 2.0",
+  "license": "MIT",
   "urls": {
     "repository": "https://github.com/Emaginations/Nightmare"
   },
@@ -20,16 +20,21 @@
     "min_version": "1.0.0",
     "max_version": "2.99.99"
   },
-    "capabilities": [
+  "capabilities": [
     "send.text",
-    "llm.generate",
     "message.get_recent",
-    "message.build_readable",
-    "chat.get_stream_by_user_id",
     "person.get_id",
     "person.get_value"
-    ],
-    "i18n": {
+  ],
+  "llm_providers": [
+    {
+      "client_type": "1m.nightmare.provider",
+      "name": "Nightmare LLM Provider",
+      "description": "喊你睡觉插件自带的 OpenAI 兼容 LLM 提供商，可用于生成催睡内容或供其他插件调用",
+      "version": "1.0.0"
+    }
+  ],
+  "i18n": {
     "default_locale": "zh-CN",
     "supported_locales": [
       "zh-CN"
