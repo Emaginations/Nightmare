@@ -11,6 +11,7 @@
 2026-6-03 try17: 优化LLM调用（检查模型可用性，自动回退默认模型），/night /nightmare 命令返回空
 2026-6-04 try18: 日志添加LLM模型名；非WebUI命令静默忽略（不发送消息）
 2026-6-05 try19: 催睡概率步进值改为0.01
+2026-6-08 try20: 重构催睡逻辑；强制使用独立LLM提供商，默认DeepSeek API，新增temperature配置
 Q：应该在什么时候获取聊天流？A：收到消息的时候（ON_MESSAGE?）
 Q：应该在什么地方获取聊天流？A：尝试在@HookHandler或@EventHandler用self.ctx.chat或尝试新的获取方法：
 按时间范围查询指定聊天流
@@ -37,6 +38,7 @@ import time
 import datetime
 import json
 import os
+import aiohttp
 
 # ============================================================================
 # 多语言化
@@ -274,7 +276,7 @@ class ReminderConfig(PluginConfigBase):
     )
 
 class LLMConfig(PluginConfigBase):
-    """LLM提示词设置。"""
+    """LLM提示词设置（独立提供商，不依赖主程序模型）"""
     __ui_label__: ClassVar[str] = "LLM提示词设置"
     __ui_order__: ClassVar[int] = 3
 
@@ -310,22 +312,80 @@ class LLMConfig(PluginConfigBase):
         },
     )
 
-    llm_model: str = Field(
-        default="",
-        description="指定使用的 LLM 模型（留空则跟随插件任务默认模型）",
+    # ---------- 独立 LLM 提供商配置 ----------
+    api_base: str = Field(
+        default="https://api.deepseek.com",
+        description="API 地址（OpenAI 兼容格式，例如 https://api.deepseek.com）",
         json_schema_extra={
-            "label": "LLM 模型",
-            "hint": "例如 deepseek-v4-flash。留空则使用 WebUI 中为本插件任务配置的默认模型。",
-            "placeholder": "留空使用任务默认模型",
+            "label": "API 地址",
+            "hint": "默认使用 DeepSeek API：https://api.deepseek.com",
+            "placeholder": "https://api.deepseek.com",
             "i18n": _schema_i18n(
-                label_en="LLM Model",
-                label_ja="LLMモデル",
-                hint_en="Specify the LLM model to use, e.g. deepseek-v4-flash. Leave empty to use the task default model.",
-                hint_ja="使用するLLMモデルを指定します（例: deepseek-v4-flash）。空の場合はタスクのデフォルトモデルを使用します。",
-                placeholder_en="Leave empty for task default",
-                placeholder_ja="空の場合はタスクデフォルト",
+                label_en="API Base URL",
+                label_ja="APIベースURL",
+                hint_en="Default: DeepSeek API https://api.deepseek.com",
+                hint_ja="デフォルト：DeepSeek API https://api.deepseek.com",
+                placeholder_en="https://api.deepseek.com",
+                placeholder_ja="https://api.deepseek.com",
             ),
             "order": 2,
+        },
+    )
+    api_key: str = Field(
+        default="",
+        description="API 密钥",
+        json_schema_extra={
+            "label": "API 密钥",
+            "hint": "Bearer Token 或 API Key",
+            "placeholder": "sk-...",
+            "i18n": _schema_i18n(
+                label_en="API Key",
+                label_ja="APIキー",
+                hint_en="Your API key.",
+                hint_ja="APIキーを入力してください。",
+                placeholder_en="sk-...",
+                placeholder_ja="sk-...",
+            ),
+            "order": 3,
+        },
+    )
+    model_name: str = Field(
+        default="deepseek-chat",
+        description="模型名称",
+        json_schema_extra={
+            "label": "模型名称",
+            "hint": "例如 deepseek-chat, deepseek-reasoner",
+            "placeholder": "deepseek-chat",
+            "i18n": _schema_i18n(
+                label_en="Model Name",
+                label_ja="モデル名",
+                hint_en="e.g. deepseek-chat",
+                hint_ja="例：deepseek-chat",
+                placeholder_en="deepseek-chat",
+                placeholder_ja="deepseek-chat",
+            ),
+            "order": 4,
+        },
+    )
+    temperature: float = Field(
+        default=0.8,
+        ge=0.0,
+        le=2.0,
+        description="生成温度，控制随机性。0-2，默认0.8",
+        json_schema_extra={
+            "label": "温度 (Temperature)",
+            "hint": "较高的值如 0.8 会使输出更随机，较低的值如 0.2 会使其更集中和确定。",
+            "x-widget": "slider",
+            "min": 0.0,
+            "max": 2.0,
+            "step": 0.1,
+            "i18n": _schema_i18n(
+                label_en="Temperature",
+                label_ja="温度",
+                hint_en="Higher values like 0.8 will make the output more random, while lower values like 0.2 will make it more focused and deterministic.",
+                hint_ja="0.8などの高い値は出力をよりランダムにし、0.2などの低い値はより集中的で決定論的にします。",
+            ),
+            "order": 5,
         },
     )
 
@@ -412,11 +472,15 @@ class NightmarePlugin(MaiBotPlugin):
         self._last_interaction: Dict[str, float] = {}
         # 记录上次催睡时间 (user_id -> timestamp)
         self._last_remind: Dict[str, float] = {}
+        # HTTP 会话（延迟创建）
+        self._http_session: Optional[aiohttp.ClientSession] = None
         # 从文件恢复状态（持久化）
         self._load_state()
 
     async def on_unload(self) -> None:
         self.ctx.logger.info("[喊你睡觉]插件已卸载")
+        if self._http_session and not self._http_session.closed:
+            await self._http_session.close()
         self._save_state()
 
     async def on_config_update(self, scope: str, config_data: dict, version: str) -> None:
@@ -631,10 +695,12 @@ class NightmarePlugin(MaiBotPlugin):
     def _is_target_user(self, user_id: str) -> bool:
         try:
             config = self.config
+            # 无差别模式
             if config.jam_reminder.enable_jam_reminder:
                 whitelist = config.jam_reminder.whitelist or []
                 return user_id not in whitelist
             else:
+                # 特定用户模式
                 target = config.scheduler.target_user
                 if not target:
                     return False
@@ -642,15 +708,15 @@ class NightmarePlugin(MaiBotPlugin):
         except Exception:
             return False
 
-    def _should_keep_reminding(self, user_id: str) -> bool:
-        """用户是否仍在活跃期（最后互动距现在 <= sleep_hours）"""
+    def _is_user_active(self, user_id: str) -> bool:
+        """用户是否仍在熬夜期（最后互动距现在 <= sleep_hours）"""
         last_interact = self._last_interaction.get(user_id, 0)
         if last_interact == 0:
             return False
         sleep_seconds = self.config.scheduler.sleep_hours * 3600
         return (time.time() - last_interact) <= sleep_seconds
 
-    def _can_remind_now(self, user_id: str) -> bool:
+    def _min_remind_interval_passed(self, user_id: str) -> bool:
         """距离上次催睡是否已超过最小间隔"""
         last_remind = self._last_remind.get(user_id, 0)
         if last_remind == 0:
@@ -667,28 +733,50 @@ class NightmarePlugin(MaiBotPlugin):
             return False
         return random.random() < prob
 
+    # ---------- 独立 LLM 调用 ----------
+    async def _call_custom_llm(self, prompt: str) -> str:
+        """使用配置的独立 LLM 提供商生成文本，传递 temperature 参数"""
+        config = self.config.llm_config
+        if not config.api_base or not config.api_key or not config.model_name:
+            raise RuntimeError("LLM 提供商配置不完整，请检查 API 地址、密钥和模型名称")
+        base = config.api_base.rstrip("/")
+        url = f"{base}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {config.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": config.model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": config.temperature,
+        }
+        if self._http_session is None or self._http_session.closed:
+            self._http_session = aiohttp.ClientSession()
+        async with self._http_session.post(url, json=payload, headers=headers, timeout=30) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise RuntimeError(f"HTTP {resp.status}: {text}")
+            data = await resp.json()
+            choices = data.get("choices", [])
+            if not choices:
+                raise RuntimeError("LLM 返回结果为空")
+            return choices[0]["message"]["content"].strip()
+
+    # ===== 催睡执行 =====
     async def _do_remind(self, stream_id: str, user_name: str, platform: str, user_id: str) -> None:
-        """执行催睡，包含 LLM 调用与日志（try19: 日志包含模型名）"""
+        """执行催睡，包含 LLM 调用与日志"""
         config = self.config
         goodnight_text = config.default_good_night.default_good_night
-        llm_model_used = "default"  # 记录实际使用的模型名称
+        llm_model_used = "default"
 
-        # LLM 模式
+        # 如果启用了 LLM，则调用独立提供商
         if config.llm_config.enable_llm:
             try:
-                # 获取可用模型列表
-                available_models = []
-                try:
-                    available_models = await self.ctx.llm.get_available_models()
-                except Exception as e:
-                    self.ctx.logger.debug(f"[喊你睡觉] 无法获取可用模型列表: {e}")
-
-                # 获取聊天上下文
+                # 获取最近聊天记录构建上下文
                 messages = await self.ctx.message.get_recent(
                     chat_id=stream_id,
                     limit=10,
                 )
-
                 context_lines = []
                 if messages and isinstance(messages, list):
                     for msg in messages[-5:]:
@@ -708,49 +796,27 @@ class NightmarePlugin(MaiBotPlugin):
                         )
                         if text and isinstance(text, str):
                             context_lines.append(f"{sender}: {text}")
-
                 context = "\n".join(context_lines) if context_lines else "（暂无聊天记录）"
-
                 prompt = f"{config.llm_config.llm_text}\n用户昵称：{user_name}\n平台：{platform}\n\n最近聊天记录：\n{context}"
 
-                # 决定使用的模型
-                chosen_model = config.llm_config.llm_model.strip() if config.llm_config.llm_model else ""
-                if chosen_model and available_models and chosen_model not in available_models:
-                    self.ctx.logger.info(
-                        f"[喊你睡觉] 指定模型 '{chosen_model}' 不可用（当前可用: {available_models}），将使用任务默认模型"
-                    )
-                    chosen_model = ""
-
-                # 调用 LLM
-                generate_kwargs = {"prompt": prompt}
-                if chosen_model:
-                    generate_kwargs["model"] = chosen_model
-
-                result = await self.ctx.llm.generate(**generate_kwargs)
-                if result.get("success") and result.get("response"):
-                    goodnight_text = result["response"].strip()
-                    # 从返回值中提取实际使用的模型名
-                    llm_model_used = result.get("model") or result.get("model_name") or chosen_model or "llm"
-                    self.ctx.logger.info(f"[喊你睡觉] LLM 生成成功，模型={llm_model_used}")
-                else:
-                    self.ctx.logger.warning("[喊你睡觉] LLM 生成失败，将使用默认文本")
+                goodnight_text = await self._call_custom_llm(prompt)
+                llm_model_used = config.llm_config.model_name or "custom"
+                self.ctx.logger.info(f"[喊你睡觉] 自定义 LLM 生成成功，模型={llm_model_used}")
             except Exception as e:
-                self.ctx.logger.warning(f"[喊你睡觉] LLM 调用异常，使用默认文本: {e}")
+                self.ctx.logger.warning(f"[喊你睡觉] 自定义 LLM 调用失败，回退默认文本: {e}")
+                # goodnight_text 保持默认
 
         if not goodnight_text or not goodnight_text.strip():
             goodnight_text = "睡吧"
 
-        # 发送
         await self.ctx.send.text(goodnight_text, stream_id)
-
-        # 更新催睡时间并持久化
         self._last_remind[user_id] = time.time()
         self._save_state()
 
         now = datetime.datetime.now()
-        source = "llm" if llm_model_used != "default" else "default"
+        source = "custom" if config.llm_config.enable_llm else "default"
         self.ctx.logger.info(
-            f"[喊你睡觉]:已推送催睡，时间{now.strftime('%Y-%m-%d %H:%M:%S')}，"
+            f"[喊你睡觉]:喊你睡觉！ 已推送催睡，时间{now.strftime('%Y-%m-%d %H:%M:%S')}，"
             f"平台{platform}，用户{user_name}({user_id})，"
             f"模型={llm_model_used}，来源={source}，"
             f"聊天内容{goodnight_text[:50]}"
@@ -782,22 +848,24 @@ class NightmarePlugin(MaiBotPlugin):
         self._save_state()
 
         now = datetime.datetime.now()
+        # 1. 时间窗口检查
         if not self._is_inside_remind_window(now):
             return
 
+        # 2. 目标用户/无差别/白名单检查
         if not self._is_target_user(user_id):
             return
 
-        # 检查用户是否仍在活跃期（发言间隔 <= sleep_hours）
-        if not self._should_keep_reminding(user_id):
+        # 3. 用户活跃度检查 (sleep_hours timegate)
+        if not self._is_user_active(user_id):
             self.ctx.logger.debug(f"[喊你睡觉] 用户 {user_id} 已沉默超过睡眠时长，不再催睡")
             return
 
-        # 检查催睡间隔
-        if not self._can_remind_now(user_id):
+        # 4. 催睡间隔检查
+        if not self._min_remind_interval_passed(user_id):
             return
 
-        # 概率判定
+        # 5. 概率判定
         if not self._roll_probability():
             self.ctx.logger.info(f"[喊你睡觉] 概率判定未通过，跳过催睡。概率={self.config.reminder.remind_probability}")
             return
@@ -830,7 +898,7 @@ class NightmarePlugin(MaiBotPlugin):
 
     @Command("nightmare", description="手动触发催睡测试", pattern=r"^/nightmare$")
     async def handle_nightmare_test(self, stream_id: str = "", **kwargs):
-        # try19 - nightmare test command (静默忽略非 WebUI，日志含模型名)
+        # try20 - nightmare test command (静默忽略非 WebUI，日志含模型名)
         message = kwargs.get("message", {})
         platform = self._get_platform(message)
 
@@ -849,7 +917,7 @@ class NightmarePlugin(MaiBotPlugin):
 
     @Command("night", description="简单测试命令", pattern=r"^/night$")
     async def handle_nightmare_simple(self, stream_id: str = "", **kwargs):
-        # try19 - night test command (静默忽略非 WebUI)
+        # try20 - night test command (静默忽略非 WebUI)
         message = kwargs.get("message", {})
         platform = self._get_platform(message)
 
@@ -868,11 +936,30 @@ class NightmarePlugin(MaiBotPlugin):
         await self.ctx.send.text(remind_message, stream_id)
 
         self.ctx.logger.info(
-            f"[喊你睡觉]:已推送催睡，时间{now}，"
+            f"[喊你睡觉]:喊你睡觉！ 已推送催睡，时间{now}，"
             f"平台{platform}，用户{user_name}，模型=N/A，来源=command，"
             f"聊天内容{remind_message}"
         )
         return True, "", True
+
+    @Command("llmtest", description="测试独立LLM提供商连接", pattern=r"^/llmtest$")
+    async def handle_llm_test(self, stream_id: str = "", **kwargs):
+        """测试自定义提供商是否可用，不受 WebUI 限制"""
+        config = self.config.llm_config
+        if not config.enable_llm:
+            await self.ctx.send.text("❌ LLM 未启用", stream_id)
+            return True, "LLM 未启用", 0
+
+        try:
+            test_prompt = "请用中文回复'连接成功'，不要加任何其他内容。"
+            result = await self._call_custom_llm(test_prompt)
+            self.ctx.logger.info(f"[喊你睡觉] LLM 提供商测试成功，返回: {result}")
+            await self.ctx.send.text(f"✅ LLM 提供商测试成功，回复: {result}", stream_id)
+            return True, "测试成功", 1
+        except Exception as e:
+            self.ctx.logger.error(f"[喊你睡觉] LLM 提供商测试失败: {e}")
+            await self.ctx.send.text(f"❌ LLM 提供商测试失败: {e}", stream_id)
+            return True, f"测试失败: {e}", 0
 
     @Command("echo echo", pattern=r"^/echo\secho\s+(?P<text>.+)$")
     async def handle_echo(self, **kwargs):
@@ -887,6 +974,4 @@ class NightmarePlugin(MaiBotPlugin):
 def create_plugin():
     return NightmarePlugin()
 
-# try19
-
-#######构建过程详见NOREADME。md#######
+# try20
