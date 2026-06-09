@@ -1003,3 +1003,6 @@ def create_plugin():
     return NightmarePlugin()
 
 # try20
+
+#todo：修/llmtest，让他与/night /nightmare一样只在webui中生效，改命令只在webui中生效为默认开启。
+#再次修改逻辑，，直接使用hook发送催睡消息，不经过原有sendtext
