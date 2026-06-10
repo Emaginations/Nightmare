@@ -12,6 +12,7 @@
 2026-6-04 try18: 日志添加LLM模型名；非WebUI命令静默忽略（不发送消息）
 2026-6-05 try19: 催睡概率步进值改为0.01
 2026-6-08 try20: 重构催睡逻辑；封装为 LLMProvider，插件自身通过 Provider 生成内容，默认 DeepSeek API，新增 temperature 配置
+2026-6-10 try21: 新增群聊白名单；改为 BLOCKING Hook 拦截消息并直接发送催睡，不经过 Maisaka 循环
 Q：应该在什么时候获取聊天流？A：收到消息的时候（ON_MESSAGE?）
 Q：应该在什么地方获取聊天流？A：尝试在@HookHandler或@EventHandler用self.ctx.chat或尝试新的获取方法：
 按时间范围查询指定聊天流
@@ -436,11 +437,11 @@ class JamReminderConfig(PluginConfigBase):
         default_factory=list,
         description="无差别催睡白名单。开启无差别催睡后，白名单中的用户不会被催促。",
         json_schema_extra={
-            "label": "白名单",
+            "label": "用户白名单",
             "hint": "在这个列表里的一定都是夜猫无疑。",
             "i18n": _schema_i18n(
-                label_en="Whitelist",
-                label_ja="ホワイトリスト",
+                label_en="User Whitelist",
+                label_ja="ユーザーホワイトリスト",
                 hint_en="Users in this list will not be reminded when jam reminder is enabled.",
                 hint_ja="無差別催促が有効な場合、このリスト内のユーザーは催促されません。",
                 placeholder_en="Enter user ID",
@@ -448,6 +449,26 @@ class JamReminderConfig(PluginConfigBase):
             ),
             "order": 1,
             "placeholder": "请输入用户ID",
+        },
+    )
+
+    # 新增：群聊白名单
+    group_whitelist: List[str] = Field(
+        default_factory=list,
+        description="无差别催睡群聊白名单。仅在列表中的群聊才会触发催睡，留空表示所有群聊。",
+        json_schema_extra={
+            "label": "群聊白名单",
+            "hint": "只在列表中的群聊触发催睡；留空则所有群聊均可触发。",
+            "i18n": _schema_i18n(
+                label_en="Group Whitelist",
+                label_ja="グループホワイトリスト",
+                hint_en="Only groups in this list will trigger reminders when jam reminder is enabled. Leave empty for all groups.",
+                hint_ja="無差別催促が有効な場合、このリスト内のグループのみリマインダーをトリガーします。空の場合はすべてのグループ。",
+                placeholder_en="Enter group ID",
+                placeholder_ja="グループIDを入力",
+            ),
+            "order": 2,
+            "placeholder": "请输入群号",
         },
     )
 
@@ -479,7 +500,6 @@ class NightmareLLMProvider(LLMProviderBase):
             "Authorization": f"Bearer {config.api_key}",
             "Content-Type": "application/json",
         }
-        # 从 request 中提取消息列表，若没有则抛出异常
         messages = request.get("message_list")
         if not messages:
             raise ValueError("message_list is required")
@@ -488,7 +508,6 @@ class NightmareLLMProvider(LLMProviderBase):
             "messages": messages,
             "temperature": config.temperature,
         }
-        # 重用插件中的 http session
         if self.plugin._http_session is None or self.plugin._http_session.closed:
             self.plugin._http_session = aiohttp.ClientSession()
         async with self.plugin._http_session.post(url, json=payload, headers=headers, timeout=30) as resp:
@@ -509,15 +528,10 @@ class NightmareLLMProvider(LLMProviderBase):
 class NightmarePlugin(MaiBotPlugin):
     async def on_load(self) -> None:
         self.ctx.logger.info("[喊你睡觉]插件已加载")
-        # 记录用户最后互动时间 (user_id -> timestamp)
         self._last_interaction: Dict[str, float] = {}
-        # 记录上次催睡时间 (user_id -> timestamp)
         self._last_remind: Dict[str, float] = {}
-        # HTTP 会话（延迟创建）
         self._http_session: Optional[aiohttp.ClientSession] = None
-        # 初始化自定义 Provider
         self.provider = NightmareLLMProvider(self)
-        # 从文件恢复状态（持久化）
         self._load_state()
 
     async def on_unload(self) -> None:
@@ -532,14 +546,12 @@ class NightmarePlugin(MaiBotPlugin):
 
     config_model = NightmareConfig
 
-    # 注册 LLM Provider，供主程序或其他插件使用
     @LLMProvider("1m.nightmare.provider", name="Nightmare LLM Provider", description="喊你睡觉插件自带的 OpenAI 兼容 LLM 提供商")
     async def handle_llm(self, operation: str, request: dict[str, Any]) -> dict[str, Any]:
         return await self.provider.dispatch(operation, request)
 
     # ===== 持久化辅助 =====
     def _get_state_file(self) -> str:
-        # 状态文件保存在插件目录下
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), "nightmare_state.json")
 
     def _load_state(self) -> None:
@@ -621,6 +633,22 @@ class NightmarePlugin(MaiBotPlugin):
 
         return ""
 
+    def _get_group_id(self, message: dict) -> str:
+        """提取群聊ID，若非群聊返回空字符串"""
+        # message_info.group_info
+        message_info = message.get("message_info", {})
+        if isinstance(message_info, dict):
+            group_info = message_info.get("group_info", {})
+            if isinstance(group_info, dict):
+                group_id = group_info.get("group_id", "")
+                if group_id:
+                    return str(group_id)
+        # 顶层 group_id
+        group_id = message.get("group_id", "")
+        if group_id:
+            return str(group_id)
+        return ""
+
     def _get_platform(self, message: dict) -> str:
         platform = message.get("platform", "")
         if platform:
@@ -668,7 +696,7 @@ class NightmarePlugin(MaiBotPlugin):
                 user_name = (
                     user_info.get("user_nickname")
                     or user_info.get("nickname")
-                    or user_info.get("user_cardname")  # QQ 群名片
+                    or user_info.get("user_cardname")
                     or user_info.get("user_name")
                 )
                 if user_name:
@@ -715,7 +743,7 @@ class NightmarePlugin(MaiBotPlugin):
                 user_name = (
                     sender.get("user_nickname")
                     or sender.get("nickname")
-                    or sender.get("card")      # QQ 群名片
+                    or sender.get("card")
                     or sender.get("user_name")
                 )
                 if user_name:
@@ -727,7 +755,6 @@ class NightmarePlugin(MaiBotPlugin):
             if person_name:
                 return person_name
 
-        # 7. 最终兜底
         return "小伙伴"
 
     def _is_inside_remind_window(self, now: datetime.datetime) -> bool:
@@ -743,18 +770,28 @@ class NightmarePlugin(MaiBotPlugin):
     def _is_target_user(self, user_id: str) -> bool:
         try:
             config = self.config
-            # 无差别模式
             if config.jam_reminder.enable_jam_reminder:
                 whitelist = config.jam_reminder.whitelist or []
                 return user_id not in whitelist
             else:
-                # 特定用户模式
                 target = config.scheduler.target_user
                 if not target:
                     return False
                 return user_id == target
         except Exception:
             return False
+
+    def _is_target_group(self, group_id: str) -> bool:
+        """检查群聊是否在催睡范围内（仅当开启无差别催睡且群聊白名单非空时生效）"""
+        if not group_id:
+            return True  # 私聊不受限制
+        config = self.config
+        if not config.jam_reminder.enable_jam_reminder:
+            return True  # 特定用户模式不限制群聊
+        group_whitelist = config.jam_reminder.group_whitelist or []
+        if not group_whitelist:
+            return True  # 未设置群聊白名单则允许所有群聊
+        return group_id in group_whitelist
 
     def _is_user_active(self, user_id: str) -> bool:
         """用户是否仍在熬夜期（最后互动距现在 <= sleep_hours）"""
@@ -781,17 +818,14 @@ class NightmarePlugin(MaiBotPlugin):
             return False
         return random.random() < prob
 
-    # ===== 催睡执行 =====
     async def _do_remind(self, stream_id: str, user_name: str, platform: str, user_id: str) -> None:
         """执行催睡，包含 LLM 调用与日志"""
         config = self.config
         goodnight_text = config.default_good_night.default_good_night
         llm_model_used = "default"
 
-        # 如果启用了 LLM，则通过自定义 Provider 生成
         if config.llm_config.enable_llm:
             try:
-                # 获取最近聊天记录构建上下文
                 messages = await self.ctx.message.get_recent(
                     chat_id=stream_id,
                     limit=10,
@@ -815,11 +849,10 @@ class NightmarePlugin(MaiBotPlugin):
                         )
                         if text and isinstance(text, str):
                             context_lines.append(f"{sender}: {text}")
-                context = "\n".join(context_lines) if context_lines else "（暂无聊天记录）"
 
+                context = "\n".join(context_lines) if context_lines else "（暂无聊天记录）"
                 prompt = f"{config.llm_config.llm_text}\n用户昵称：{user_name}\n平台：{platform}\n\n最近聊天记录：\n{context}"
 
-                # 通过自己的 Provider 生成回复
                 request_data = {
                     "message_list": [{"role": "user", "content": prompt}]
                 }
@@ -829,7 +862,6 @@ class NightmarePlugin(MaiBotPlugin):
                 self.ctx.logger.info(f"[喊你睡觉] 自定义 LLM 生成成功，模型={llm_model_used}")
             except Exception as e:
                 self.ctx.logger.warning(f"[喊你睡觉] 自定义 LLM 调用失败，回退默认文本: {e}")
-                # goodnight_text 保持默认
 
         if not goodnight_text or not goodnight_text.strip():
             goodnight_text = "睡吧"
@@ -847,59 +879,70 @@ class NightmarePlugin(MaiBotPlugin):
             f"聊天内容{goodnight_text[:50]}"
         )
 
-    # ===== Hook：每条消息触发 =====
+    # ===== Hook：BLOCKING 拦截消息，直接发送催睡 =====
 
     @HookHandler(
         "chat.receive.after_process",
         name="nightmare_reminder",
-        description="每条消息到达后检测催睡条件",
-        mode=HookMode.OBSERVE,  # 观察模式，不影响消息处理
-        order=HookOrder.LATE,    # 延后执行
+        description="拦截消息进行催睡",
+        mode=HookMode.BLOCKING,   # 改为 BLOCKING，可 abort 消息
+        order=HookOrder.LATE,
+        timeout_ms=5000,
     )
-    async def handle_after_receive(self, message: dict, **kwargs) -> None:
-        """收到消息后检查是否需要催睡"""
+    async def handle_after_receive(self, message: dict, **kwargs) -> dict | None:
+        """收到消息后检查是否需要催睡，若触发则发送催睡并拦截原消息"""
         del kwargs
 
         if not self._enabled():
-            return
+            return None
 
         user_id = self._get_user_id(message)
         if not user_id:
-            self.ctx.logger.info(f"[喊你睡觉] 未能提取 user_id，message keys: {list(message.keys())}")
-            return
+            self.ctx.logger.debug("[喊你睡觉] 未能提取 user_id，跳过")
+            return None
 
-        # 更新用户最后互动时间并持久化
+        # 更新互动时间
         self._last_interaction[user_id] = time.time()
         self._save_state()
 
         now = datetime.datetime.now()
-        # 1. 时间窗口检查
+        # 1. 时间窗口
         if not self._is_inside_remind_window(now):
-            return
+            return None
 
-        # 2. 目标用户/无差别/白名单检查
+        # 2. 目标用户
         if not self._is_target_user(user_id):
-            return
+            return None
 
-        # 3. 用户活跃度检查 (sleep_hours timegate)
+        # 3. 群聊白名单检查
+        group_id = self._get_group_id(message)
+        if not self._is_target_group(group_id):
+            self.ctx.logger.debug(f"[喊你睡觉] 群 {group_id} 不在群聊白名单中，跳过")
+            return None
+
+        # 4. 活跃度 (sleep_hours timegate)
         if not self._is_user_active(user_id):
             self.ctx.logger.debug(f"[喊你睡觉] 用户 {user_id} 已沉默超过睡眠时长，不再催睡")
-            return
+            return None
 
-        # 4. 催睡间隔检查
+        # 5. 最小间隔
         if not self._min_remind_interval_passed(user_id):
-            return
+            return None
 
-        # 5. 概率判定
+        # 6. 概率
         if not self._roll_probability():
             self.ctx.logger.info(f"[喊你睡觉] 概率判定未通过，跳过催睡。概率={self.config.reminder.remind_probability}")
-            return
+            return None
 
         platform = self._get_platform(message)
         user_name = await self._get_user_name(message, user_id, platform)
         stream_id = message.get("stream_id", "")
 
+        # 发送催睡消息
         await self._do_remind(stream_id, user_name, platform, user_id)
+
+        # 拦截当前消息，阻止 Maisaka 继续处理
+        return {"action": "abort"}
 
     # ===== 事件处理器 =====
 
@@ -923,11 +966,10 @@ class NightmarePlugin(MaiBotPlugin):
 
     @Command("nightmare", description="手动触发催睡测试", pattern=r"^/nightmare$")
     async def handle_nightmare_test(self, stream_id: str = "", **kwargs):
-        # try20 - nightmare test command (静默忽略非 WebUI，日志含模型名)
+        # try21 - nightmare test command (强制触发，不拦截)
         message = kwargs.get("message", {})
         platform = self._get_platform(message)
 
-        # 检查是否仅限 WebUI
         if self.config.scheduler.webui_only_commands and platform != "webui":
             self.ctx.logger.info(
                 f"[喊你睡觉] /nightmare 命令在非WebUI平台被触发，已忽略。平台={platform}, stream_id={stream_id}"
@@ -942,11 +984,9 @@ class NightmarePlugin(MaiBotPlugin):
 
     @Command("night", description="简单测试命令", pattern=r"^/night$")
     async def handle_nightmare_simple(self, stream_id: str = "", **kwargs):
-        # try20 - night test command (静默忽略非 WebUI)
         message = kwargs.get("message", {})
         platform = self._get_platform(message)
 
-        # 检查是否仅限 WebUI
         if self.config.scheduler.webui_only_commands and platform != "webui":
             self.ctx.logger.info(
                 f"[喊你睡觉] /night 命令在非WebUI平台被触发，已忽略。平台={platform}, stream_id={stream_id}"
@@ -969,7 +1009,6 @@ class NightmarePlugin(MaiBotPlugin):
 
     @Command("llmtest", description="测试独立LLM提供商连接", pattern=r"^/llmtest$")
     async def handle_llm_test(self, stream_id: str = "", **kwargs):
-        """测试自定义提供商是否可用，不受 WebUI 限制"""
         config = self.config.llm_config
         if not config.enable_llm:
             await self.ctx.send.text("❌ LLM 未启用", stream_id)
@@ -991,7 +1030,6 @@ class NightmarePlugin(MaiBotPlugin):
 
     @Command("echo echo", pattern=r"^/echo\secho\s+(?P<text>.+)$")
     async def handle_echo(self, **kwargs):
-        """回响"""
         matched = kwargs.get("matched_groups", {})
         text = matched.get("text", "").strip()
         stream_id = kwargs["stream_id"]
@@ -1002,7 +1040,4 @@ class NightmarePlugin(MaiBotPlugin):
 def create_plugin():
     return NightmarePlugin()
 
-# try20
-
-#todo：修/llmtest，让他与/night /nightmare一样只在webui中生效，改命令只在webui中生效为默认开启。
-#再次修改逻辑，，直接使用hook发送催睡消息，不经过原有sendtext
+# try21
