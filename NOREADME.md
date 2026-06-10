@@ -3371,3 +3371,25 @@ class SmartPokePlugin(MaiBotPlugin):
 def create_plugin() -> SmartPokePlugin:
     """Runner 调用入口。"""
     return SmartPokePlugin()
+------------------------------------------------------try22
+06-11 02:49:57 [插件Hook分发] HookHandler 1m.nightmare.nightmare_reminder 中止了 Hook chat.receive.after_process
+06-11 02:49:57 [所见] 消息 -1976511745 在预处理后被 Hook 中止
+06-11 02:49:57 [plugin.1m.nightmare] [喊你睡觉] 自定义 LLM 生成成功，模型=deepseek-v4-flash
+06-11 02:49:57 [plugin.1m.nightmare] [喊你睡觉]:喊你睡觉！ 已推送催睡，时间2026-06-11 02:49:57，平台qq，目标群160953668，用户永雏搭菲(960173979)，模型=deepseek-v4-flash，来源=custom，聊天内容永雏搭菲，夜猫子模式该关机啦～再不睡小心明天变成“永雏困菲”哦！🌙
+
+菲八啾比: 06-11 02:59:19
+可能是id无效
+
+菲八啾比: 06-11 02:59:23
+加个诊断日志
+
+菲八啾比: 06-11 02:59:35
+去这个位置
+
+菲八啾比: 06-11 02:59:36
+result = await self.ctx.send.text(goodnight_text, stream_id)
+
+菲八啾比: 06-11 02:59:38
+添加
+
+这个菲比秋比可能是对的，听她的修改22
