@@ -3391,5 +3391,8 @@ result = await self.ctx.send.text(goodnight_text, stream_id)
 
 菲八啾比: 06-11 02:59:38
 添加
+self.ctx.logger.info(f"[喊你睡觉] 准备发送: stream_id={stream_id}, text={goodnight_text[:50]}")
+result = await self.ctx.send.text(goodnight_text, stream_id)
+self.ctx.logger.info(f"[喊你睡觉] 发送结果: {result}")
 
 这个菲比秋比可能是对的，听她的修改22
