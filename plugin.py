@@ -16,6 +16,22 @@
 2026-6-11 try22: 在 _do_remind 添加 send.text 诊断日志，记录发送结果
 2026-6-12 try23: 修复 stream_id 为空问题（优先取 session_id，群聊时通过 chat API 反查）
 2026-6-12 try24: 修复时间窗口逻辑（支持跨天）；无差别催睡改为催促发话人而非目标用户；LLM提示词隐藏添加催睡时间；UI文案优化
+2026-6-13 try25: 名字出现概率（私聊0.8/无差别0.3，间隔越短越低最小0.01）；新增沉默模式；LLM附带改为催睡时间+当前时间；LLM决定名字前后置
+Q：应该在什么时候获取聊天流？A：收到消息的时候（ON_MESSAGE?）
+Q：应该在什么地方获取聊天流？A：尝试在@HookHandler或@EventHandler用self.ctx.chat或尝试新的获取方法：
+按时间范围查询指定聊天流
+messages = await self.ctx.message.get_by_time_in_chat(
+    chat_id=stream_id,
+    start_time=start_time,
+    end_time=end_time,
+)
+Q：如何获得ID、昵称：A：参考
+通过 person API 获取用户信息
+person_id = await self.ctx.person.get_id("qq", target_user_id)
+person_name = await self.ctx.person.get_value(person_id, "person_name")
+nickname = await self.ctx.person.get_value(person_id, "nickname")
+Q：[喊你睡觉]LLM调用异常: [E_CAPABILITY_DENIED] 插件 1m.nightmare 未获授权能力: message.get_recent??
+A: _manifest.json 中需要添加权限
 """
 
 from maibot_sdk import API, Field, MaiBotPlugin, MessageGateway, PluginConfigBase, PluginContext, Tool, Command, EventHandler, HookHandler, LLMProvider, LLMProviderBase
@@ -62,7 +78,6 @@ class NightmarePluginSection(PluginConfigBase):
     """插件基本配置。"""
     __ui_label__: ClassVar[str] = "插件设置"
     __ui_order__: ClassVar[int] = 0
-
     enabled: bool = Field(default=False, description="是否启用喊你睡觉插件", json_schema_extra={"label": "开关", "i18n": _schema_i18n(label_en="Enable", label_ja="アダプターを有効化"), "order": 0})
     config_version: str = Field(default="2.0.0", description="配置版本", json_schema_extra={"label": "配置版本", "i18n": _schema_i18n(label_en="Config version", label_ja="設定バージョン", hint_en="Configuration version number.", hint_ja="設定のバージョン番号。"), "order": 1})
 
@@ -74,9 +89,10 @@ class SchedulerConfig(PluginConfigBase):
 
     target_user: str = Field(default="", description="催促对象（QQ号、微信号或其他平台用户ID）", json_schema_extra={"label": "催促对象", "hint": "在这里设定催促对象", "placeholder": "请输入用户ID", "i18n": _schema_i18n(label_en="Target user", label_ja="催促対象", hint_en="Set the target user to remind.", hint_ja="催促する対象を設定します。", placeholder_en="Enter user ID", placeholder_ja="ユーザーIDを入力"), "order": 0})
     test_user: str = Field(default="WebUI用户", description="用于从webUI测试", json_schema_extra={"label": "webui聊天用户名", "hint": "用户名位于webui聊天室左下角", "i18n": _schema_i18n(label_en="WebUI chat username", label_ja="WebUIチャットユーザー名", hint_en="For testing only.", hint_ja="テスト専用。"), "placeholder": "WebUI用户", "order": 0})
-    webui_only_commands: bool = Field(default=True, description="是否只有WebUI聊天可以触发 /night 和 /nightmare 命令", json_schema_extra={"label": "命令仅限WebUI", "hint": "开启时/night /nightmare命令仅在WebUI聊天中可用", "i18n": _schema_i18n(label_en="Commands only in WebUI", label_ja="コマンドはWebUIのみ"), "order": 1})
+    webui_only_commands: bool = Field(default=True, description="是否只有WebUI聊天可以触发 /night 和 /nightmare 命令", json_schema_extra={"label": "命令仅限WebUI", "hint": "开启后命令仅在WebUI聊天中可用", "i18n": _schema_i18n(label_en="Commands only in WebUI", label_ja="コマンドはWebUIのみ"), "order": 1})
     start_time: str = Field(default="22:00", pattern=r"^([01]\d|2[0-3]):([0-5]\d)$", description="催睡开始时间（格式 HH:MM，例如 22:00）", json_schema_extra={"label": "开始时间", "placeholder": "22:00", "i18n": _schema_i18n(label_en="Start time", label_ja="開始時間"), "order": 2})
     sleep_hours: float = Field(default=8, ge=4, le=12, description="睡眠时长（小时）", json_schema_extra={"label": "睡眠时长（小时）", "hint": "低于这个时间间隔发言会被继续催促", "x-widget": "slider", "min": 4, "max": 12, "step": 0.5, "i18n": _schema_i18n(label_en="Sleep hours", label_ja="睡眠時間"), "order": 3})
+    silent_mode: bool = Field(default=False, description="沉默模式：开启后拦截消息但不发送任何内容", json_schema_extra={"label": "沉默模式", "hint": "沉默...是最好的陪伴", "i18n": _schema_i18n(label_en="Silent Mode", label_ja="サイレントモード", hint_en="Silence... is the best company.", hint_ja="沈黙...は最高の仲間です。"), "order": 4})
 
 
 class ReminderConfig(PluginConfigBase):
@@ -220,7 +236,6 @@ class NightmarePlugin(MaiBotPlugin):
             return False
 
     def _get_user_id(self, message: dict) -> str:
-        """从消息中提取用户ID"""
         message_info = message.get("message_info", {})
         if isinstance(message_info, dict):
             user_info = message_info.get("user_info", {})
@@ -270,7 +285,6 @@ class NightmarePlugin(MaiBotPlugin):
         return "unknown"
 
     async def _get_user_name(self, message: dict, user_id: str = "", platform: str = "") -> str:
-        """从消息中提取用户名"""
         message_info = message.get("message_info", {})
         if isinstance(message_info, dict):
             user_info = message_info.get("user_info", {})
@@ -304,13 +318,7 @@ class NightmarePlugin(MaiBotPlugin):
             pass
         return "小伙伴"
 
-    # ===== 时间窗口（支持跨天）=====
     def _is_inside_remind_window(self, now: datetime.datetime) -> bool:
-        """
-        以 start_time 为起点、sleep_hours 为窗口长度。
-        示例：start_time=02:00, sleep_hours=8 → 窗口为 02:00 ~ 10:00
-        跨天时 22:00 到次日 06:00 同样适用。
-        """
         try:
             config = self.config
             start_parts = config.scheduler.start_time.split(":")
@@ -319,21 +327,14 @@ class NightmarePlugin(MaiBotPlugin):
             start_total = start_h * 60 + start_m
             end_total = (start_total + int(config.scheduler.sleep_hours * 60)) % (24 * 60)
             current_total = now.hour * 60 + now.minute
-
             if start_total <= end_total:
-                # 不跨天：start_total <= current_total <= end_total
                 return start_total <= current_total <= end_total
             else:
-                # 跨天：current_total >= start_total 或 current_total <= end_total
                 return current_total >= start_total or current_total <= end_total
         except Exception:
             return False
 
     def _is_target_user(self, user_id: str) -> bool:
-        """
-        无差别催睡：催促发话人自己（不在用户白名单中）
-        特定用户模式：只催促配置的 target_user
-        """
         try:
             config = self.config
             if config.jam_reminder.enable_jam_reminder:
@@ -377,6 +378,23 @@ class NightmarePlugin(MaiBotPlugin):
         if prob <= 0.0: return False
         return random.random() < prob
 
+    def _get_name_probability(self, is_private: bool, user_id: str) -> float:
+        """
+        名字出现概率：
+        - 私聊: 基础 0.8
+        - 群聊(无差别): 基础 0.3
+        - 间隔越短越低: min = 0.01
+        最终概率 = max(base - interval_penalty, 0.01)
+        """
+        base = 0.8 if is_private else 0.3
+        last_remind = self._last_remind.get(user_id, 0)
+        if last_remind == 0:
+            return base
+        elapsed = time.time() - last_remind
+        interval = self.config.reminder.interval_seconds
+        penalty = max(0.0, (1.0 - elapsed / interval)) * (base - 0.01)
+        return max(base - penalty, 0.01)
+
     async def _resolve_stream_id(self, message: dict, group_id: str) -> str:
         stream_id = message.get("stream_id") or message.get("session_id") or ""
         if stream_id:
@@ -391,7 +409,7 @@ class NightmarePlugin(MaiBotPlugin):
         return stream_id
 
     # ===== 催睡执行 =====
-    async def _do_remind(self, stream_id: str, user_name: str, platform: str, user_id: str, group_id: str = "") -> None:
+    async def _do_remind(self, stream_id: str, user_name: str, platform: str, user_id: str, group_id: str = "", is_private: bool = False) -> None:
         config = self.config
         goodnight_text = config.default_good_night.default_good_night
         llm_model_used = "default"
@@ -408,9 +426,13 @@ class NightmarePlugin(MaiBotPlugin):
                         if text and isinstance(text, str):
                             context_lines.append(f"{sender}: {text}")
                 context = "\n".join(context_lines) if context_lines else "（暂无聊天记录）"
-                # 隐藏加入催睡时间
+                now = datetime.datetime.now()
+                # 计算名字出现概率
+                name_prob = self._get_name_probability(is_private, user_id)
                 prompt = (f"{config.llm_config.llm_text}\n用户昵称：{user_name}\n平台：{platform}\n"
-                          f"催睡时间：{config.scheduler.start_time}\n\n最近聊天记录：\n{context}")
+                          f"应该催睡的时间：{config.scheduler.start_time}，现在的时间：{now.strftime('%H:%M:%S')}\n"
+                          f"请在生成的催睡语句中，以{name_prob:.0%}的概率包含用户昵称\"{user_name}\"（前置或后置均可，由你决定），"
+                          f"以{1-name_prob:.0%}的概率不包含昵称。\n\n最近聊天记录：\n{context}")
                 request_data = {"message_list": [{"role": "user", "content": prompt}]}
                 response = await self.provider.get_response(request_data)
                 goodnight_text = response.get("content", "").strip()
@@ -422,6 +444,20 @@ class NightmarePlugin(MaiBotPlugin):
         if not goodnight_text or not goodnight_text.strip():
             goodnight_text = "睡吧"
 
+        # 沉默模式：只记日志不发送
+        if config.scheduler.silent_mode:
+            now = datetime.datetime.now()
+            target_info = f"群{group_id}" if group_id else "私聊"
+            self.ctx.logger.info(
+                f"[喊你睡觉]:喊你睡觉！ 沉默模式，未发送催睡，时间{now.strftime('%Y-%m-%d %H:%M:%S')}，"
+                f"平台{platform}，目标{target_info}，用户{user_name}({user_id})，"
+                f"模型={llm_model_used}，来源=silent"
+            )
+            self._last_remind[user_id] = time.time()
+            self._save_state()
+            return
+
+        # 正常发送
         self.ctx.logger.info(f"[喊你睡觉] 准备发送: stream_id={stream_id}, text={goodnight_text[:50]}")
         result = await self.ctx.send.text(goodnight_text, stream_id)
         self.ctx.logger.info(f"[喊你睡觉] 发送结果: {result}")
@@ -484,7 +520,12 @@ class NightmarePlugin(MaiBotPlugin):
             self.ctx.logger.warning("[喊你睡觉] 无法解析 stream_id，放弃发送催睡")
             return None
 
-        await self._do_remind(stream_id, user_name, platform, user_id, group_id)
+        # 判断是否为私聊
+        is_private = not bool(group_id)
+
+        await self._do_remind(stream_id, user_name, platform, user_id, group_id, is_private)
+
+        # 沉默模式下仍然拦截消息
         return {"action": "abort"}
 
     # ===== 事件处理器 =====
@@ -507,7 +548,8 @@ class NightmarePlugin(MaiBotPlugin):
         user_id = self._get_user_id(message)
         user_name = await self._get_user_name(message, user_id, platform)
         group_id = self._get_group_id(message)
-        await self._do_remind(stream_id, user_name, platform, user_id, group_id)
+        is_private = not bool(group_id)
+        await self._do_remind(stream_id, user_name, platform, user_id, group_id, is_private)
         return True, "", True
 
     @Command("night", description="简单测试命令", pattern=r"^/night$")
@@ -557,6 +599,4 @@ class NightmarePlugin(MaiBotPlugin):
 def create_plugin():
     return NightmarePlugin()
 
-# try24
-
-#######构建过程参见NOREADME.md#######
+# try25
