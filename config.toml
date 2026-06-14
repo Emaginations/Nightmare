@@ -1,10 +1,31 @@
 [plugin]
-enabled = true
+enabled = false
 config_version = "2.0.0"
 
 [scheduler]
-start_hour = 22
-start_minute = 0
+target_user = ""
+test_user = "WebUI用户"
+webui_only_commands = true
+start_time = "22:00"
+sleep_hours = 8.0
+silent_mode = false
 
 [reminder]
-interval_second = 10
+interval_seconds = 30
+remind_probability = 1.0
+
+[llm_config]
+enable_llm = true
+llm_text = "请根据当前上下文生成一句催促某人去睡觉的话"
+api_base = "https://api.deepseek.com"
+api_key = ""
+model_name = "deepseek-chat"
+temperature = 0.8
+
+[default_good_night]
+default_good_night = "睡吧"
+
+[jam_reminder]
+enable_jam_reminder = false
+whitelist = []
+group_whitelist = []

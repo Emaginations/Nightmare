@@ -1,14 +1,14 @@
 {
   "manifest_version": 2,
   "id": "1m.nightmare",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "name": "喊你睡觉",
   "description": "一个无处不在的催睡插件,超过时间后无论你在哪里发言都会被催睡觉",
   "author": {
     "name": "1m",
     "url": "https://github.com/Emaginations"
   },
-  "license": "MIT",
+  "license": "Apache License 2.0",
   "urls": {
     "repository": "https://github.com/Emaginations/Nightmare"
   },
