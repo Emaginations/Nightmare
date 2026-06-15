@@ -16,7 +16,8 @@
 2026-6-11 try22: 在 _do_remind 添加 send.text 诊断日志，记录发送结果
 2026-6-12 try23: 修复 stream_id 为空问题（优先取 session_id，群聊时通过 chat API 反查）
 2026-6-12 try24: 修复时间窗口逻辑（支持跨天）；无差别催睡改为催促发话人而非目标用户；LLM提示词隐藏添加催睡时间；UI文案优化
-2026-6-13 try25: 名字出现概率（私聊0.8/无差别0.3，间隔越短越低最小0.01）；新增沉默模式；LLM附带改为催睡时间+当前时间；LLM决定名字前后置
+2026-6-13 try25: 名字出现概率（私聊0.8/无差别0.3，间隔越短越低最小0.01）；新增沉默模式；LLM附带改为催睡时间+当前时间；LLM决定名字前后置；
+           /echo echo、/llmtest 加入 webui_only_commands 限制；/llmtest 提示添加插件名称
 Q：应该在什么时候获取聊天流？A：收到消息的时候（ON_MESSAGE?）
 Q：应该在什么地方获取聊天流？A：尝试在@HookHandler或@EventHandler用self.ctx.chat或尝试新的获取方法：
 按时间范围查询指定聊天流
@@ -572,26 +573,35 @@ class NightmarePlugin(MaiBotPlugin):
     @Command("llmtest", description="测试独立LLM提供商连接", pattern=r"^/llmtest$")
     async def handle_llm_test(self, stream_id: str = "", **kwargs):
         config = self.config.llm_config
+        message = kwargs.get("message", {})
+        platform = self._get_platform(message)
+        if self.config.scheduler.webui_only_commands and platform != "webui":
+            self.ctx.logger.info(f"[喊你睡觉] /llmtest 命令在非WebUI平台被触发，已忽略。平台={platform}, stream_id={stream_id}")
+            return True, "", True
         if not config.enable_llm:
-            await self.ctx.send.text("❌ LLM 未启用", stream_id)
+            await self.ctx.send.text("❌ 喊你睡觉 LLM 未启用", stream_id)
             return True, "LLM 未启用", 0
         try:
             test_request = {"message_list": [{"role": "user", "content": "请用中文回复'连接成功'，不要加任何其他内容。"}]}
             response = await self.provider.get_response(test_request)
             result = response.get("content", "")
             self.ctx.logger.info(f"[喊你睡觉] LLM 提供商测试成功，返回: {result}")
-            await self.ctx.send.text(f"✅ LLM 提供商测试成功，回复: {result}", stream_id)
+            await self.ctx.send.text(f"✅ 喊你睡觉 LLM 提供商测试成功，回复: {result}", stream_id)
             return True, "测试成功", 1
         except Exception as e:
             self.ctx.logger.error(f"[喊你睡觉] LLM 提供商测试失败: {e}")
-            await self.ctx.send.text(f"❌ LLM 提供商测试失败: {e}", stream_id)
+            await self.ctx.send.text(f"❌ 喊你睡觉 LLM 提供商测试失败: {e}", stream_id)
             return True, f"测试失败: {e}", 0
 
     @Command("echo echo", pattern=r"^/echo\secho\s+(?P<text>.+)$")
-    async def handle_echo(self, **kwargs):
+    async def handle_echo(self, stream_id: str = "", **kwargs):
+        message = kwargs.get("message", {})
+        platform = self._get_platform(message)
+        if self.config.scheduler.webui_only_commands and platform != "webui":
+            self.ctx.logger.info(f"[喊你睡觉] /echo echo 命令在非WebUI平台被触发，已忽略。平台={platform}, stream_id={stream_id}")
+            return True, "", True
         matched = kwargs.get("matched_groups", {})
         text = matched.get("text", "").strip()
-        stream_id = kwargs["stream_id"]
         await self.ctx.send.text(text, stream_id)
         return True, text, 1
 
