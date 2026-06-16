@@ -16,8 +16,9 @@
 2026-6-11 try22: 在 _do_remind 添加 send.text 诊断日志，记录发送结果
 2026-6-12 try23: 修复 stream_id 为空问题（优先取 session_id，群聊时通过 chat API 反查）
 2026-6-12 try24: 修复时间窗口逻辑（支持跨天）；无差别催睡改为催促发话人而非目标用户；LLM提示词隐藏添加催睡时间；UI文案优化
-2026-6-13 try25: 名字出现概率（私聊0.8/无差别0.3，间隔越短越低最小0.01）；新增沉默模式；LLM附带改为催睡时间+当前时间；LLM决定名字前后置；
-           /echo echo、/llmtest 加入 webui_only_commands 限制；/llmtest 提示添加插件名称
+2026-6-13 try25: 名字出现概率（私聊0.8/无差别0.3，间隔越短越低最小0.01）；新增沉默模式；LLM附带改为催睡时间+当前时间；
+           插件自行随机决定昵称前后置，不再传给LLM；所有命令统一受webui_only_commands限制；
+           使用WebUI中配置的LLM提示词；修改默认提示词；prompt中隐藏添加去昵称、去引号要求
 Q：应该在什么时候获取聊天流？A：收到消息的时候（ON_MESSAGE?）
 Q：应该在什么地方获取聊天流？A：尝试在@HookHandler或@EventHandler用self.ctx.chat或尝试新的获取方法：
 按时间范围查询指定聊天流
@@ -90,7 +91,7 @@ class SchedulerConfig(PluginConfigBase):
 
     target_user: str = Field(default="", description="催促对象（QQ号、微信号或其他平台用户ID）", json_schema_extra={"label": "催促对象", "hint": "在这里设定催促对象", "placeholder": "请输入用户ID", "i18n": _schema_i18n(label_en="Target user", label_ja="催促対象", hint_en="Set the target user to remind.", hint_ja="催促する対象を設定します。", placeholder_en="Enter user ID", placeholder_ja="ユーザーIDを入力"), "order": 0})
     test_user: str = Field(default="WebUI用户", description="用于从webUI测试", json_schema_extra={"label": "webui聊天用户名", "hint": "用户名位于webui聊天室左下角", "i18n": _schema_i18n(label_en="WebUI chat username", label_ja="WebUIチャットユーザー名", hint_en="For testing only.", hint_ja="テスト専用。"), "placeholder": "WebUI用户", "order": 0})
-    webui_only_commands: bool = Field(default=True, description="是否只有WebUI聊天可以触发 /night 和 /nightmare 命令", json_schema_extra={"label": "命令仅限WebUI", "hint": "开启后命令仅在WebUI聊天中可用", "i18n": _schema_i18n(label_en="Commands only in WebUI", label_ja="コマンドはWebUIのみ"), "order": 1})
+    webui_only_commands: bool = Field(default=True, description="是否只有WebUI聊天可以触发命令", json_schema_extra={"label": "命令仅限WebUI", "hint": "开启后所有命令仅在WebUI聊天中可用", "i18n": _schema_i18n(label_en="Commands only in WebUI", label_ja="コマンドはWebUIのみ"), "order": 1})
     start_time: str = Field(default="22:00", pattern=r"^([01]\d|2[0-3]):([0-5]\d)$", description="催睡开始时间（格式 HH:MM，例如 22:00）", json_schema_extra={"label": "开始时间", "placeholder": "22:00", "i18n": _schema_i18n(label_en="Start time", label_ja="開始時間"), "order": 2})
     sleep_hours: float = Field(default=8, ge=4, le=12, description="睡眠时长（小时）", json_schema_extra={"label": "睡眠时长（小时）", "hint": "低于这个时间间隔发言会被继续催促", "x-widget": "slider", "min": 4, "max": 12, "step": 0.5, "i18n": _schema_i18n(label_en="Sleep hours", label_ja="睡眠時間"), "order": 3})
     silent_mode: bool = Field(default=False, description="沉默模式：开启后拦截消息但不发送任何内容", json_schema_extra={"label": "沉默模式", "hint": "沉默...是最好的陪伴", "i18n": _schema_i18n(label_en="Silent Mode", label_ja="サイレントモード", hint_en="Silence... is the best company.", hint_ja="沈黙...は最高の仲間です。"), "order": 4})
@@ -111,7 +112,8 @@ class LLMConfig(PluginConfigBase):
     __ui_order__: ClassVar[int] = 3
 
     enable_llm: bool = Field(default=True, description="是否启用LLM", json_schema_extra={"label": "是否启用LLM", "i18n": _schema_i18n(label_en="Enable LLM", label_ja="LLMを有効にする"), "order": 0})
-    llm_text: str = Field(default="请根据当前上下文生成一句催促某人去睡觉的话", description="LLM提示词", json_schema_extra={"label": "LLM提示词", "hint": "默认：请根据当前上下文生成一句催促某人去睡觉的话", "i18n": _schema_i18n(label_en="LLM prompt", label_ja="LLMプロンプト"), "order": 1})
+    # 修改默认提示词
+    llm_text: str = Field(default="请根据上下文生成一句不重复的简短催睡语句，不要包含用户昵称。", description="LLM提示词", json_schema_extra={"label": "LLM提示词", "hint": "自定义LLM生成指令，不要包含用户昵称，已自动附加", "i18n": _schema_i18n(label_en="LLM prompt", label_ja="LLMプロンプト"), "order": 1})
     api_base: str = Field(default="https://api.deepseek.com", description="API 地址", json_schema_extra={"label": "API 地址", "placeholder": "https://api.deepseek.com", "i18n": _schema_i18n(label_en="API Base URL", label_ja="APIベースURL"), "order": 2})
     api_key: str = Field(default="", description="API 密钥", json_schema_extra={"label": "API 密钥", "placeholder": "sk-...", "i18n": _schema_i18n(label_en="API Key", label_ja="APIキー"), "order": 3})
     model_name: str = Field(default="deepseek-chat", description="模型名称", json_schema_extra={"label": "模型名称", "placeholder": "deepseek-chat", "i18n": _schema_i18n(label_en="Model Name", label_ja="モデル名"), "order": 4})
@@ -428,15 +430,17 @@ class NightmarePlugin(MaiBotPlugin):
                             context_lines.append(f"{sender}: {text}")
                 context = "\n".join(context_lines) if context_lines else "（暂无聊天记录）"
                 now = datetime.datetime.now()
-                # 计算名字出现概率
-                name_prob = self._get_name_probability(is_private, user_id)
-                prompt = (f"{config.llm_config.llm_text}\n用户昵称：{user_name}\n平台：{platform}\n"
+                # 使用用户在WebUI中配置的提示词，并追加隐藏要求
+                prompt = (f"{config.llm_config.llm_text}\n"
+                          f"平台：{platform}\n"
                           f"应该催睡的时间：{config.scheduler.start_time}，现在的时间：{now.strftime('%H:%M:%S')}\n"
-                          f"请在生成的催睡语句中，以{name_prob:.0%}的概率包含用户昵称\"{user_name}\"（前置或后置均可，由你决定），"
-                          f"以{1-name_prob:.0%}的概率不包含昵称。\n\n最近聊天记录：\n{context}")
+                          f"回复内容不要携带任何引号。\n\n"
+                          f"最近聊天记录：\n{context}")
                 request_data = {"message_list": [{"role": "user", "content": prompt}]}
                 response = await self.provider.get_response(request_data)
                 goodnight_text = response.get("content", "").strip()
+                # 额外去除可能遗留的引号
+                goodnight_text = goodnight_text.strip('"''「」『』“”‘’')
                 llm_model_used = config.llm_config.model_name or "custom"
                 self.ctx.logger.info(f"[喊你睡觉] 自定义 LLM 生成成功，模型={llm_model_used}")
             except Exception as e:
@@ -444,6 +448,15 @@ class NightmarePlugin(MaiBotPlugin):
 
         if not goodnight_text or not goodnight_text.strip():
             goodnight_text = "睡吧"
+
+        # 插件自行决定是否添加昵称
+        if goodnight_text:
+            name_prob = self._get_name_probability(is_private, user_id)
+            if random.random() < name_prob:
+                if random.random() < 0.5:
+                    goodnight_text = f"{user_name}，{goodnight_text}"
+                else:
+                    goodnight_text = f"{goodnight_text}，{user_name}"
 
         # 沉默模式：只记日志不发送
         if config.scheduler.silent_mode:
