@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "1m.nightmare",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "name": "喊你睡觉",
   "description": "一个无处不在的催睡插件,超过时间后无论你在哪里发言都会被催睡觉",
   "author": {
@@ -14,17 +14,18 @@
   },
   "host_application": {
     "min_version": "1.0.0",
-    "max_version": "1.0.1"
+    "max_version": "1.11.1"
   },
   "sdk": {
     "min_version": "1.0.0",
     "max_version": "2.99.99"
   },
-  "plugin_type": "management",
+  "plugin_type": "extension",
   "display": {
     "icon": {
-      "type": "emoji",
-      "value": "👾"
+      "type": "local",
+      "value": "assets/icon.png",
+      "fallback": "package"
     }
   },
   "capabilities": [
