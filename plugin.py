@@ -113,10 +113,10 @@ class LLMConfig(PluginConfigBase):
 
     enable_llm: bool = Field(default=True, description="是否启用LLM", json_schema_extra={"label": "是否启用LLM", "i18n": _schema_i18n(label_en="Enable LLM", label_ja="LLMを有効にする"), "order": 0})
     # 修改默认提示词
-    llm_text: str = Field(default="请根据上下文生成一句不重复的简短催睡语句，不要包含用户昵称。", description="LLM提示词", json_schema_extra={"label": "LLM提示词", "hint": "自定义LLM生成指令，不要包含用户昵称，已自动附加", "i18n": _schema_i18n(label_en="LLM prompt", label_ja="LLMプロンプト"), "order": 1})
+    llm_text: str = Field(default="请根据当前上下文生成一句带催促的晚安回应", description="LLM提示词", json_schema_extra={"label": "LLM提示词", "hint": "自定义LLM生成指令，默认为“请根据当前上下文生成一句带催促的晚安回应”", "i18n": _schema_i18n(label_en="LLM prompt", label_ja="LLMプロンプト"), "order": 1})
     api_base: str = Field(default="https://api.deepseek.com", description="API 地址", json_schema_extra={"label": "API 地址", "placeholder": "https://api.deepseek.com", "i18n": _schema_i18n(label_en="API Base URL", label_ja="APIベースURL"), "order": 2})
     api_key: str = Field(default="", description="API 密钥", json_schema_extra={"label": "API 密钥", "placeholder": "sk-...", "i18n": _schema_i18n(label_en="API Key", label_ja="APIキー"), "order": 3})
-    model_name: str = Field(default="deepseek-chat", description="模型名称", json_schema_extra={"label": "模型名称", "placeholder": "deepseek-chat", "i18n": _schema_i18n(label_en="Model Name", label_ja="モデル名"), "order": 4})
+    model_name: str = Field(default="deepseek-v4-flash", description="模型名称", json_schema_extra={"label": "模型名称", "placeholder": "deepseek-chat", "i18n": _schema_i18n(label_en="Model Name", label_ja="モデル名"), "order": 4})
     temperature: float = Field(default=0.8, ge=0.0, le=2.0, description="生成温度", json_schema_extra={"label": "温度 (Temperature)", "x-widget": "slider", "min": 0.0, "max": 2.0, "step": 0.1, "i18n": _schema_i18n(label_en="Temperature", label_ja="温度"), "order": 5})
 
 
