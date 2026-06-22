@@ -107,7 +107,7 @@ class ReminderConfig(PluginConfigBase):
 
 
 class LLMConfig(PluginConfigBase):
-    """LLM提示词设置（独立提供商）"""
+    """LLM提示词设置（开启会增加Token消耗）"""
     __ui_label__: ClassVar[str] = "LLM提示词设置"
     __ui_order__: ClassVar[int] = 3
 
