@@ -19,6 +19,7 @@
 2026-6-13 try25: 名字出现概率（私聊0.8/无差别0.3，间隔越短越低最小0.01）；新增沉默模式；LLM附带改为催睡时间+当前时间；
            插件自行随机决定昵称前后置，不再传给LLM；所有命令统一受webui_only_commands限制；
            使用WebUI中配置的LLM提示词；修改默认提示词；prompt中隐藏添加去昵称、去引号要求
+2026-6-28 try27: 基于try25，新增“接近醒来”时段（sleep_hours结束前2小时）收到消息时发送内置早安/责备短语（共10条），无需LLM。
 Q：应该在什么时候获取聊天流？A：收到消息的时候（ON_MESSAGE?）
 Q：应该在什么地方获取聊天流？A：尝试在@HookHandler或@EventHandler用self.ctx.chat或尝试新的获取方法：
 按时间范围查询指定聊天流
@@ -107,16 +108,15 @@ class ReminderConfig(PluginConfigBase):
 
 
 class LLMConfig(PluginConfigBase):
-    """LLM提示词设置（开启会增加Token消耗）"""
+    """LLM提示词设置（独立提供商）"""
     __ui_label__: ClassVar[str] = "LLM提示词设置"
     __ui_order__: ClassVar[int] = 3
 
     enable_llm: bool = Field(default=True, description="是否启用LLM", json_schema_extra={"label": "是否启用LLM", "i18n": _schema_i18n(label_en="Enable LLM", label_ja="LLMを有効にする"), "order": 0})
-    # 修改默认提示词
-    llm_text: str = Field(default="请根据当前上下文生成一句带催促的晚安回应", description="LLM提示词", json_schema_extra={"label": "LLM提示词", "hint": "自定义LLM生成指令，默认为“请根据当前上下文生成一句带催促的晚安回应”", "i18n": _schema_i18n(label_en="LLM prompt", label_ja="LLMプロンプト"), "order": 1})
+    llm_text: str = Field(default="请根据上下文生成一句不重复的简短催睡语句，不要包含用户昵称。", description="LLM提示词", json_schema_extra={"label": "LLM提示词", "hint": "自定义LLM生成指令，不要包含用户昵称的要求已自动附加", "i18n": _schema_i18n(label_en="LLM prompt", label_ja="LLMプロンプト"), "order": 1})
     api_base: str = Field(default="https://api.deepseek.com", description="API 地址", json_schema_extra={"label": "API 地址", "placeholder": "https://api.deepseek.com", "i18n": _schema_i18n(label_en="API Base URL", label_ja="APIベースURL"), "order": 2})
     api_key: str = Field(default="", description="API 密钥", json_schema_extra={"label": "API 密钥", "placeholder": "sk-...", "i18n": _schema_i18n(label_en="API Key", label_ja="APIキー"), "order": 3})
-    model_name: str = Field(default="deepseek-v4-flash", description="模型名称", json_schema_extra={"label": "模型名称", "placeholder": "deepseek-chat", "i18n": _schema_i18n(label_en="Model Name", label_ja="モデル名"), "order": 4})
+    model_name: str = Field(default="deepseek-chat", description="模型名称", json_schema_extra={"label": "模型名称", "placeholder": "deepseek-chat", "i18n": _schema_i18n(label_en="Model Name", label_ja="モデル名"), "order": 4})
     temperature: float = Field(default=0.8, ge=0.0, le=2.0, description="生成温度", json_schema_extra={"label": "温度 (Temperature)", "x-widget": "slider", "min": 0.0, "max": 2.0, "step": 0.1, "i18n": _schema_i18n(label_en="Temperature", label_ja="温度"), "order": 5})
 
 
@@ -182,6 +182,20 @@ class NightmareLLMProvider(LLMProviderBase):
 # 插件主体
 # ============================================================================
 class NightmarePlugin(MaiBotPlugin):
+    # 内置早安/责备短语（接近醒来时随机发送）
+    MORNING_PHRASES = [
+        "天快亮了！",
+        "早上好（并不），赶紧再去睡会儿！",
+        "还不起？要吃早餐了。",
+        "你是要早起吗？现在躺下还能捞几个小时。",
+        "再发消息我就要告诉太阳你还没睡。",
+        "继续睡吧。",
+        "你昨天也是这么说的，结果呢？",
+        "已经有人开始晨练了，你刚上线。",
+        "闭眼",
+        "继续修仙吗？",
+    ]
+
     async def on_load(self) -> None:
         self.ctx.logger.info("[喊你睡觉]插件已加载")
         self._last_interaction: Dict[str, float] = {}
@@ -337,6 +351,44 @@ class NightmarePlugin(MaiBotPlugin):
         except Exception:
             return False
 
+    def _is_near_wake_time(self, now: datetime.datetime) -> bool:
+        """判断当前时间是否在睡眠窗口的最后2小时内（即将醒来）"""
+        try:
+            config = self.config
+            start_parts = config.scheduler.start_time.split(":")
+            start_h = int(start_parts[0])
+            start_m = int(start_parts[1])
+            start_total = start_h * 60 + start_m
+            end_total = (start_total + int(config.scheduler.sleep_hours * 60)) % (24 * 60)
+            current_total = now.hour * 60 + now.minute
+
+            # 计算窗口长度（分钟）
+            window_len = int(config.scheduler.sleep_hours * 60)
+            # 如果窗口小于等于2小时，那么整个窗口都是"接近醒来"区间
+            if window_len <= 120:
+                return self._is_inside_remind_window(now)
+
+            # 计算“最后2小时”的起始点（以结束时间为基准往前推120分钟）
+            near_start_total = (end_total - 120) % (24 * 60)
+
+            if start_total <= end_total:
+                # 不跨天
+                if near_start_total < start_total:
+                    near_start_total = start_total
+                return current_total >= near_start_total and current_total <= end_total
+            else:
+                # 跨天
+                # 接近区间是 near_start_total 到 end_total 跨过0点
+                if current_total >= near_start_total or current_total <= end_total:
+                    # 但要确保不超过 start_total 到 end_total 的大区间
+                    if current_total >= start_total or current_total <= end_total:
+                        # 再进一步确保在 near_start_total 之后
+                        if near_start_total <= current_total or current_total <= end_total:
+                            return True
+                return False
+        except Exception:
+            return False
+
     def _is_target_user(self, user_id: str) -> bool:
         try:
             config = self.config
@@ -382,13 +434,6 @@ class NightmarePlugin(MaiBotPlugin):
         return random.random() < prob
 
     def _get_name_probability(self, is_private: bool, user_id: str) -> float:
-        """
-        名字出现概率：
-        - 私聊: 基础 0.8
-        - 群聊(无差别): 基础 0.3
-        - 间隔越短越低: min = 0.01
-        最终概率 = max(base - interval_penalty, 0.01)
-        """
         base = 0.8 if is_private else 0.3
         last_remind = self._last_remind.get(user_id, 0)
         if last_remind == 0:
@@ -414,58 +459,65 @@ class NightmarePlugin(MaiBotPlugin):
     # ===== 催睡执行 =====
     async def _do_remind(self, stream_id: str, user_name: str, platform: str, user_id: str, group_id: str = "", is_private: bool = False) -> None:
         config = self.config
-        goodnight_text = config.default_good_night.default_good_night
-        llm_model_used = "default"
+        now = datetime.datetime.now()
 
-        if config.llm_config.enable_llm:
-            try:
-                messages = await self.ctx.message.get_recent(chat_id=stream_id, limit=10)
-                context_lines = []
-                if messages and isinstance(messages, list):
-                    for msg in messages[-5:]:
-                        if not isinstance(msg, dict): continue
-                        sender = msg.get("user_nickname") or msg.get("user_name") or msg.get("sender_name") or msg.get("user_id", "?")
-                        text = msg.get("processed_plain_text") or msg.get("raw_message") or msg.get("content") or ""
-                        if text and isinstance(text, str):
-                            context_lines.append(f"{sender}: {text}")
-                context = "\n".join(context_lines) if context_lines else "（暂无聊天记录）"
-                now = datetime.datetime.now()
-                # 使用用户在WebUI中配置的提示词，并追加隐藏要求
-                prompt = (f"{config.llm_config.llm_text}\n"
-                          f"平台：{platform}\n"
-                          f"应该催睡的时间：{config.scheduler.start_time}，现在的时间：{now.strftime('%H:%M:%S')}\n"
-                          f"回复内容不要携带任何引号。\n\n"
-                          f"最近聊天记录：\n{context}")
-                request_data = {"message_list": [{"role": "user", "content": prompt}]}
-                response = await self.provider.get_response(request_data)
-                goodnight_text = response.get("content", "").strip()
-                # 额外去除可能遗留的引号
-                goodnight_text = goodnight_text.strip('"''「」『』“”‘’')
-                llm_model_used = config.llm_config.model_name or "custom"
-                self.ctx.logger.info(f"[喊你睡觉] 自定义 LLM 生成成功，模型={llm_model_used}")
-            except Exception as e:
-                self.ctx.logger.warning(f"[喊你睡觉] 自定义 LLM 调用失败，回退默认文本: {e}")
+        # 判断是否接近醒来
+        near_wake = self._is_near_wake_time(now)
+        if near_wake:
+            # 使用内置早安/责备短语
+            goodnight_text = random.choice(self.MORNING_PHRASES)
+            llm_model_used = "builtin-morning"
+            self.ctx.logger.info(f"[喊你睡觉] 接近醒来时段，使用内置短语")
+        else:
+            # 原有LLM逻辑
+            goodnight_text = config.default_good_night.default_good_night
+            llm_model_used = "default"
 
-        if not goodnight_text or not goodnight_text.strip():
-            goodnight_text = "睡吧"
+            if config.llm_config.enable_llm:
+                try:
+                    messages = await self.ctx.message.get_recent(chat_id=stream_id, limit=10)
+                    context_lines = []
+                    if messages and isinstance(messages, list):
+                        for msg in messages[-5:]:
+                            if not isinstance(msg, dict): continue
+                            sender = msg.get("user_nickname") or msg.get("user_name") or msg.get("sender_name") or msg.get("user_id", "?")
+                            text = msg.get("processed_plain_text") or msg.get("raw_message") or msg.get("content") or ""
+                            if text and isinstance(text, str):
+                                context_lines.append(f"{sender}: {text}")
+                    context = "\n".join(context_lines) if context_lines else "（暂无聊天记录）"
+                    prompt = (f"{config.llm_config.llm_text}\n"
+                              f"平台：{platform}\n"
+                              f"应该催睡的时间：{config.scheduler.start_time}，现在的时间：{now.strftime('%H:%M:%S')}\n"
+                              f"回复内容不要携带任何引号。\n\n"
+                              f"最近聊天记录：\n{context}")
+                    request_data = {"message_list": [{"role": "user", "content": prompt}]}
+                    response = await self.provider.get_response(request_data)
+                    goodnight_text = response.get("content", "").strip()
+                    goodnight_text = goodnight_text.strip('"''「」『』“”‘’')
+                    llm_model_used = config.llm_config.model_name or "custom"
+                    self.ctx.logger.info(f"[喊你睡觉] 自定义 LLM 生成成功，模型={llm_model_used}")
+                except Exception as e:
+                    self.ctx.logger.warning(f"[喊你睡觉] 自定义 LLM 调用失败，回退默认文本: {e}")
 
-        # 插件自行决定是否添加昵称
-        if goodnight_text:
-            name_prob = self._get_name_probability(is_private, user_id)
-            if random.random() < name_prob:
-                if random.random() < 0.5:
-                    goodnight_text = f"{user_name}，{goodnight_text}"
-                else:
-                    goodnight_text = f"{goodnight_text}，{user_name}"
+            if not goodnight_text or not goodnight_text.strip():
+                goodnight_text = "睡吧"
+
+            # 插件自行决定是否添加昵称（只在非早安模式下）
+            if goodnight_text and not near_wake:
+                name_prob = self._get_name_probability(is_private, user_id)
+                if random.random() < name_prob:
+                    if random.random() < 0.5:
+                        goodnight_text = f"{user_name}，{goodnight_text}"
+                    else:
+                        goodnight_text = f"{goodnight_text}，{user_name}"
 
         # 沉默模式：只记日志不发送
         if config.scheduler.silent_mode:
-            now = datetime.datetime.now()
             target_info = f"群{group_id}" if group_id else "私聊"
             self.ctx.logger.info(
                 f"[喊你睡觉]:喊你睡觉！ 沉默模式，未发送催睡，时间{now.strftime('%Y-%m-%d %H:%M:%S')}，"
                 f"平台{platform}，目标{target_info}，用户{user_name}({user_id})，"
-                f"模型={llm_model_used}，来源=silent"
+                f"模型={llm_model_used}，来源={'morning' if near_wake else 'custom' if config.llm_config.enable_llm else 'default'}"
             )
             self._last_remind[user_id] = time.time()
             self._save_state()
@@ -479,8 +531,7 @@ class NightmarePlugin(MaiBotPlugin):
         self._last_remind[user_id] = time.time()
         self._save_state()
 
-        now = datetime.datetime.now()
-        source = "custom" if config.llm_config.enable_llm else "default"
+        source = "morning" if near_wake else ("custom" if config.llm_config.enable_llm else "default")
         target_info = f"群{group_id}" if group_id else "私聊"
         self.ctx.logger.info(
             f"[喊你睡觉]:喊你睡觉！ 已推送催睡，时间{now.strftime('%Y-%m-%d %H:%M:%S')}，"
@@ -534,12 +585,10 @@ class NightmarePlugin(MaiBotPlugin):
             self.ctx.logger.warning("[喊你睡觉] 无法解析 stream_id，放弃发送催睡")
             return None
 
-        # 判断是否为私聊
         is_private = not bool(group_id)
 
         await self._do_remind(stream_id, user_name, platform, user_id, group_id, is_private)
 
-        # 沉默模式下仍然拦截消息
         return {"action": "abort"}
 
     # ===== 事件处理器 =====
@@ -622,4 +671,4 @@ class NightmarePlugin(MaiBotPlugin):
 def create_plugin():
     return NightmarePlugin()
 
-# try25
+# try27
